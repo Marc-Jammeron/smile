@@ -1,0 +1,26 @@
+# .github/workflows/gitleaks.yml
+name: gitleaks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install gitleaks
+        run: |
+          gh release download --repo gitleaks/gitleaks --pattern "*linux_x64.tar.gz"
+          tar -xzf gitleaks_*_linux_x64.tar.gz gitleaks
+          sudo mv gitleaks /usr/local/bin/
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Run gitleaks
+        run: gitleaks detect --source . --verbose
