@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Env files - JAMAIS commit ces valeurs réelles
+.env
+.env.*
+!.env.example
+!**/.env.example
+
+# Build outputs
+dist/
+build/
+**/dist/
+**/build/
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS/Editor
+.DS_Store
+.vscode/
+.idea/
+
+# Sequelize/DB
+*.sqlite
+
+# Divers
+.cache/

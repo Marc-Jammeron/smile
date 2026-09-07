@@ -1,0 +1,9 @@
+{
+  "name": "smile-monorepo",
+  "private": true,
+  "workspaces": [
+    "front-shared",
+    "front-admin",
+    "front-client"
+  ]
+}

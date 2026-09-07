@@ -1,0 +1,32 @@
+{
+  "name": "p1",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "",
+  "main": "server.js",
+  "scripts": {
+    "start": "node -r dotenv/config server.js",
+    "dev": "nodemon -r dotenv/config server.js",
+    "test": "node --experimental-test-module-mocks --test test/**/*.test.js",
+    "init-db-dev": "node --env-file=.env src/scripts/init-db-dev.js",
+    "hash-password": "node --env-file=.env src/scripts/hash-password.js"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.1105.0",
+    "@aws-sdk/s3-request-presigner": "^3.1105.0",
+    "archiver": "^7.0.1",
+    "argon2": "^0.45.1",
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "express-rate-limit": "^8.6.2",
+    "express-session": "^1.19.0",
+    "nodemon": "^3.1.14",
+    "pg": "^8.22.0",
+    "sequelize": "^6.37.8",
+    "sharp": "^0.35.3",
+    "umzug": "^3.8.3"
+  }
+}
