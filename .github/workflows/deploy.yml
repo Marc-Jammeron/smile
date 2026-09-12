@@ -52,7 +52,7 @@ jobs:
       - name: Deploy to Serverless Container
         run: |
           curl -s https://raw.githubusercontent.com/scaleway/scaleway-cli/master/scripts/get.sh | sh
-          scw container container update $CONTAINER_BACK registry-image=$REGISTRY/back:${{ github.sha }}
+          scw container container update $CONTAINER_BACK image=$REGISTRY/back:${{ github.sha }}
         env:
           SCW_ACCESS_KEY: ${{ secrets.SCW_ACCESS_KEY }}
           SCW_SECRET_KEY: ${{ secrets.SCW_SECRET_KEY }}
@@ -81,7 +81,7 @@ jobs:
       - name: Deploy to Serverless Container
         run: |
           curl -s https://raw.githubusercontent.com/scaleway/scaleway-cli/master/scripts/get.sh | sh
-          scw container container update $CONTAINER_FRONT_ADMIN registry-image=$REGISTRY/front-admin:${{ github.sha }}
+          scw container container update $CONTAINER_FRONT_ADMIN image=$REGISTRY/front-admin:${{ github.sha }}
         env:
           SCW_ACCESS_KEY: ${{ secrets.SCW_ACCESS_KEY }}
           SCW_SECRET_KEY: ${{ secrets.SCW_SECRET_KEY }}
@@ -109,7 +109,7 @@ jobs:
       - name: Deploy to Serverless Container
         run: |
           curl -s https://raw.githubusercontent.com/scaleway/scaleway-cli/master/scripts/get.sh | sh
-          scw container container update $CONTAINER_FRONT_CLIENT registry-image=$REGISTRY/front-client:${{ github.sha }}
+          scw container container update $CONTAINER_FRONT_CLIENT image=$REGISTRY/front-client:${{ github.sha }}
         env:
           SCW_ACCESS_KEY: ${{ secrets.SCW_ACCESS_KEY }}
           SCW_SECRET_KEY: ${{ secrets.SCW_SECRET_KEY }}
