@@ -10,6 +10,8 @@ import { requireAuth, verifyOrigin } from './src/middleware/auth.middleware.js';
 
 const app = express();
 
+app.set('trust proxy', 1); // 1 hop : le conteneur est derrière Envoy (edge Scaleway)
+
 const allowedOrigins = process.env.CORS_ORIGIN.split(',').map(origin => origin.trim());
 
 app.use(cors({
