@@ -1,0 +1,111 @@
+name: build-and-deploy
+
+on:
+  push:
+    branches: [main]
+
+env:
+  REGISTRY: rg.fr-par.scw.cloud/smile
+  CONTAINER_BACK: 8a9547ea-a7d8-4a0a-85c8-4cb77fd80838
+  CONTAINER_FRONT_ADMIN: 51eeb22c-6901-45e2-a06e-6a6eb2e80b40
+  CONTAINER_FRONT_CLIENT: f6a305d4-f0dc-4c43-8152-d9dae4924aff
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+      front-admin: ${{ steps.filter.outputs.front-admin }}
+      front-client: ${{ steps.filter.outputs.front-client }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            backend:
+              - 'back/**'
+            front-admin:
+              - 'front-admin/**'
+              - 'front-shared/**'
+            front-client:
+              - 'front-client/**'
+              - 'front-shared/**'
+
+  deploy-backend:
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Log in to Scaleway Registry
+        run: echo "${{ secrets.SCW_SECRET_KEY }}" | docker login rg.fr-par.scw.cloud -u nologin --password-stdin
+      - name: Build and push
+        run: |
+          docker build -f back/Dockerfile -t $REGISTRY/back:${{ github.sha }} back/
+          docker tag $REGISTRY/back:${{ github.sha }} $REGISTRY/back:latest
+          docker push $REGISTRY/back:${{ github.sha }}
+          docker push $REGISTRY/back:latest
+      - name: Deploy to Serverless Container
+        run: |
+          curl -fsSL https://github.com/scaleway/scaleway-cli/releases/latest/download/scaleway-cli_linux_amd64 -o /usr/local/bin/scw
+          chmod +x /usr/local/bin/scw
+          scw container container update $CONTAINER_BACK registry-image=$REGISTRY/back:${{ github.sha }}
+        env:
+          SCW_ACCESS_KEY: ${{ secrets.SCW_ACCESS_KEY }}
+          SCW_SECRET_KEY: ${{ secrets.SCW_SECRET_KEY }}
+          SCW_DEFAULT_ORGANIZATION_ID: ${{ secrets.SCW_DEFAULT_ORGANIZATION_ID }}
+          SCW_DEFAULT_PROJECT_ID: ${{ secrets.SCW_DEFAULT_PROJECT_ID }}
+
+  deploy-front-admin:
+    needs: changes
+    if: needs.changes.outputs.front-admin == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Log in to Scaleway Registry
+        run: echo "${{ secrets.SCW_SECRET_KEY }}" | docker login rg.fr-par.scw.cloud -u nologin --password-stdin
+      - name: Build and push
+        run: |
+          docker build -f front-admin/Dockerfile -t $REGISTRY/front-admin:${{ github.sha }} . \
+            --build-arg VITE_API_BASE_URL=${{ secrets.VITE_API_BASE_URL }} \
+            --build-arg VITE_CLIENT_BASE_URL=${{ secrets.VITE_CLIENT_BASE_URL }}
+          docker tag $REGISTRY/front-admin:${{ github.sha }} $REGISTRY/front-admin:latest
+          docker push $REGISTRY/front-admin:${{ github.sha }}
+          docker push $REGISTRY/front-admin:latest
+      - name: Deploy to Serverless Container
+        run: |
+          curl -fsSL https://github.com/scaleway/scaleway-cli/releases/latest/download/scaleway-cli_linux_amd64 -o /usr/local/bin/scw
+          chmod +x /usr/local/bin/scw
+          scw container container update $CONTAINER_FRONT_ADMIN registry-image=$REGISTRY/front-admin:${{ github.sha }}
+        env:
+          SCW_ACCESS_KEY: ${{ secrets.SCW_ACCESS_KEY }}
+          SCW_SECRET_KEY: ${{ secrets.SCW_SECRET_KEY }}
+          SCW_DEFAULT_ORGANIZATION_ID: ${{ secrets.SCW_DEFAULT_ORGANIZATION_ID }}
+          SCW_DEFAULT_PROJECT_ID: ${{ secrets.SCW_DEFAULT_PROJECT_ID }}
+
+  deploy-front-client:
+    needs: changes
+    if: needs.changes.outputs.front-client == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Log in to Scaleway Registry
+        run: echo "${{ secrets.SCW_SECRET_KEY }}" | docker login rg.fr-par.scw.cloud -u nologin --password-stdin
+      - name: Build and push
+        run: |
+          docker build -f front-client/Dockerfile -t $REGISTRY/front-client:${{ github.sha }} . \
+            --build-arg VITE_API_BASE_URL=${{ secrets.VITE_API_BASE_URL }}
+          docker tag $REGISTRY/front-client:${{ github.sha }} $REGISTRY/front-client:latest
+          docker push $REGISTRY/front-client:${{ github.sha }}
+          docker push $REGISTRY/front-client:latest
+      - name: Deploy to Serverless Container
+        run: |
+          curl -fsSL https://github.com/scaleway/scaleway-cli/releases/latest/download/scaleway-cli_linux_amd64 -o /usr/local/bin/scw
+          chmod +x /usr/local/bin/scw
+          scw container container update $CONTAINER_FRONT_CLIENT registry-image=$REGISTRY/front-client:${{ github.sha }}
+        env:
+          SCW_ACCESS_KEY: ${{ secrets.SCW_ACCESS_KEY }}
+          SCW_SECRET_KEY: ${{ secrets.SCW_SECRET_KEY }}
+          SCW_DEFAULT_ORGANIZATION_ID: ${{ secrets.SCW_DEFAULT_ORGANIZATION_ID }}
+          SCW_DEFAULT_PROJECT_ID: ${{ secrets.SCW_DEFAULT_PROJECT_ID }}
