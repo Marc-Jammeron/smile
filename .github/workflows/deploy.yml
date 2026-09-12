@@ -38,18 +38,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+
       - name: Log in to Scaleway Registry
         run: echo "${{ secrets.SCW_SECRET_KEY }}" | docker login rg.fr-par.scw.cloud -u nologin --password-stdin
+
       - name: Build and push
         run: |
           docker build -f back/Dockerfile -t $REGISTRY/back:${{ github.sha }} back/
           docker tag $REGISTRY/back:${{ github.sha }} $REGISTRY/back:latest
           docker push $REGISTRY/back:${{ github.sha }}
           docker push $REGISTRY/back:latest
+
       - name: Deploy to Serverless Container
         run: |
-          gh release download --repo scaleway/scaleway-cli --pattern "*linux-x86_64" --output /usr/local/bin/scw
-          chmod +x /usr/local/bin/scw
+          curl -s https://raw.githubusercontent.com/scaleway/scaleway-cli/master/scripts/get.sh | sh
           scw container container update $CONTAINER_BACK registry-image=$REGISTRY/back:${{ github.sha }}
         env:
           SCW_ACCESS_KEY: ${{ secrets.SCW_ACCESS_KEY }}
@@ -63,8 +65,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+
       - name: Log in to Scaleway Registry
         run: echo "${{ secrets.SCW_SECRET_KEY }}" | docker login rg.fr-par.scw.cloud -u nologin --password-stdin
+
       - name: Build and push
         run: |
           docker build -f front-admin/Dockerfile -t $REGISTRY/front-admin:${{ github.sha }} . \
@@ -73,10 +77,10 @@ jobs:
           docker tag $REGISTRY/front-admin:${{ github.sha }} $REGISTRY/front-admin:latest
           docker push $REGISTRY/front-admin:${{ github.sha }}
           docker push $REGISTRY/front-admin:latest
+
       - name: Deploy to Serverless Container
         run: |
-          gh release download --repo scaleway/scaleway-cli --pattern "*linux-x86_64" --output /usr/local/bin/scw
-          chmod +x /usr/local/bin/scw
+          curl -s https://raw.githubusercontent.com/scaleway/scaleway-cli/master/scripts/get.sh | sh
           scw container container update $CONTAINER_FRONT_ADMIN registry-image=$REGISTRY/front-admin:${{ github.sha }}
         env:
           SCW_ACCESS_KEY: ${{ secrets.SCW_ACCESS_KEY }}
@@ -90,8 +94,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+
       - name: Log in to Scaleway Registry
         run: echo "${{ secrets.SCW_SECRET_KEY }}" | docker login rg.fr-par.scw.cloud -u nologin --password-stdin
+
       - name: Build and push
         run: |
           docker build -f front-client/Dockerfile -t $REGISTRY/front-client:${{ github.sha }} . \
@@ -99,10 +105,10 @@ jobs:
           docker tag $REGISTRY/front-client:${{ github.sha }} $REGISTRY/front-client:latest
           docker push $REGISTRY/front-client:${{ github.sha }}
           docker push $REGISTRY/front-client:latest
+
       - name: Deploy to Serverless Container
         run: |
-          gh release download --repo scaleway/scaleway-cli --pattern "*linux-x86_64" --output /usr/local/bin/scw
-          chmod +x /usr/local/bin/scw
+          curl -s https://raw.githubusercontent.com/scaleway/scaleway-cli/master/scripts/get.sh | sh
           scw container container update $CONTAINER_FRONT_CLIENT registry-image=$REGISTRY/front-client:${{ github.sha }}
         env:
           SCW_ACCESS_KEY: ${{ secrets.SCW_ACCESS_KEY }}
