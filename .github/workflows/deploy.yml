@@ -48,7 +48,7 @@ jobs:
           docker push $REGISTRY/back:latest
       - name: Deploy to Serverless Container
         run: |
-          curl -fsSL https://github.com/scaleway/scaleway-cli/releases/latest/download/scaleway-cli_linux_amd64 -o /usr/local/bin/scw
+          gh release download --repo scaleway/scaleway-cli --pattern "*linux-x86_64" --output /usr/local/bin/scw
           chmod +x /usr/local/bin/scw
           scw container container update $CONTAINER_BACK registry-image=$REGISTRY/back:${{ github.sha }}
         env:
@@ -75,7 +75,7 @@ jobs:
           docker push $REGISTRY/front-admin:latest
       - name: Deploy to Serverless Container
         run: |
-          curl -fsSL https://github.com/scaleway/scaleway-cli/releases/latest/download/scaleway-cli_linux_amd64 -o /usr/local/bin/scw
+          gh release download --repo scaleway/scaleway-cli --pattern "*linux-x86_64" --output /usr/local/bin/scw
           chmod +x /usr/local/bin/scw
           scw container container update $CONTAINER_FRONT_ADMIN registry-image=$REGISTRY/front-admin:${{ github.sha }}
         env:
@@ -101,7 +101,7 @@ jobs:
           docker push $REGISTRY/front-client:latest
       - name: Deploy to Serverless Container
         run: |
-          curl -fsSL https://github.com/scaleway/scaleway-cli/releases/latest/download/scaleway-cli_linux_amd64 -o /usr/local/bin/scw
+          gh release download --repo scaleway/scaleway-cli --pattern "*linux-x86_64" --output /usr/local/bin/scw
           chmod +x /usr/local/bin/scw
           scw container container update $CONTAINER_FRONT_CLIENT registry-image=$REGISTRY/front-client:${{ github.sha }}
         env:
