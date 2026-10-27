@@ -15,7 +15,7 @@ app.set('trust proxy', 1); // 1 hop : le conteneur est derrière Envoy (edge Sca
 const adminCors = createAdminCors();
 const clientCors = createClientCors();
 
-app.use(express.json());
+app.use(express.json({ inflate: false })); // refuse les corps compressés (Node2Shell, CVE-2026-111497)
 app.use(session({
     secret: process.env.SESSION_SECRET,
     resave: false,
