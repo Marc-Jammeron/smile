@@ -2,11 +2,13 @@ import './App.css'
 import { useState, useEffect } from 'react'
 import Gallery from './components/Gallery.jsx'
 import Login from './components/Login.jsx'
+import WatermarkSettings from './components/WatermarkSettings.jsx'
 import { login, logout, getCurrentPhotographer } from './api/auth.js'
 
 function App() {
   const [photographer, setPhotographer] = useState(null)
   const [checkingSession, setCheckingSession] = useState(true)
+  const [view, setView] = useState('gallery')
 
   useEffect(() => {
     getCurrentPhotographer()
@@ -22,6 +24,7 @@ function App() {
   const handleLogout = async () => {
     await logout()
     setPhotographer(null)
+    setView('gallery')
   }
 
   if (checkingSession) {
@@ -36,9 +39,12 @@ function App() {
     <>
       <div className="topbar">
         <span>{photographer.email}</span>
+        <button className="back-button" onClick={() => setView(view === 'gallery' ? 'settings' : 'gallery')}>
+          {view === 'gallery' ? 'Réglages' : 'Retour'}
+        </button>
         <button className="back-button" onClick={handleLogout}>Déconnexion</button>
       </div>
-      <Gallery />
+      {view === 'gallery' ? <Gallery /> : <WatermarkSettings />}
     </>
   )
 }

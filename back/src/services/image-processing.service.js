@@ -1,5 +1,8 @@
 import sharp from "sharp";
+import { readFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 import s3Repository from "../repository/s3.repository.js";
+import { validateWatermarkValues, loadSavedWatermarkValues, buildWatermarkConfig } from "./settings.service.js";
 
 const THUMBNAIL_WIDTH = 400;
 const THUMBNAIL_JPEG_QUALITY = 80;
@@ -7,12 +10,7 @@ const THUMBNAIL_JPEG_QUALITY = 80;
 const PREVIEW_WIDTH = 1200;
 const PREVIEW_JPEG_QUALITY = 75;
 
-// L'asset watermark (PNG transparent) est chargé depuis WATERMARK_ASSET_PATH plutôt
-// que codé en dur, pour pouvoir le remplacer sans toucher au code.
-const WATERMARK_ASSET_PATH = process.env.WATERMARK_ASSET_PATH || "./assets/watermark-placeholder.png";
-const WATERMARK_OPACITY = Number(process.env.WATERMARK_OPACITY || 0.6);
-const WATERMARK_POSITION = process.env.WATERMARK_POSITION || "southeast";
-const WATERMARK_MARGIN = Number(process.env.WATERMARK_MARGIN || 24);
+const WATERMARK_TEST_PHOTO_PATH = fileURLToPath(new URL("../../assets/watermark-test-photo.jpg", import.meta.url));
 
 const deriveDerivedKey = (key, suffix) => `${key.replace(/\.[^./]+$/, "")}-${suffix}.jpg`;
 
@@ -40,15 +38,18 @@ const computeCornerOffset = (position, containerWidth, containerHeight, overlayW
     return { left: Math.max(0, Math.round(left)), top: Math.max(0, Math.round(top)) };
 };
 
-// Réduit l'opacité du watermark en atténuant uniquement son canal alpha
-// (les canaux couleur restent inchangés).
-const applyOpacity = (buffer, opacity) =>
-    sharp(buffer)
+const applyOpacity = async (input, opacity) => {
+    const rgba = await sharp(input)
+        .toColourspace("srgb")
         .ensureAlpha()
+        .png()
+        .toBuffer();
+    return sharp(rgba)
         .linear([1, 1, 1, opacity], [0, 0, 0, 0])
         .toBuffer();
+};
 
-const buildPreview = async (imageBuffer, { watermark = true } = {}) => {
+export const buildPreview = async (imageBuffer, { watermark = false } = {}) => {
     const { data: resizedBuffer, info } = await sharp(imageBuffer)
         .resize({ width: PREVIEW_WIDTH, withoutEnlargement: true })
         .toBuffer({ resolveWithObject: true });
@@ -59,11 +60,26 @@ const buildPreview = async (imageBuffer, { watermark = true } = {}) => {
             .toBuffer();
     }
 
-    const watermarkBuffer = await applyOpacity(WATERMARK_ASSET_PATH, WATERMARK_OPACITY);
-    const { width: watermarkWidth, height: watermarkHeight } = await sharp(watermarkBuffer).metadata();
+    let watermarkInput = watermark.image;
+    if (watermark.size != null) {
+        const targetWidth = Math.max(1, Math.round(info.width * watermark.size / 100));
+        watermarkInput = await sharp(watermarkInput).resize({ width: targetWidth }).toBuffer();
+    }
+
+    let watermarkBuffer = await applyOpacity(watermarkInput, watermark.opacity);
+    let { width: watermarkWidth, height: watermarkHeight } = await sharp(watermarkBuffer).metadata();
+
+    if (watermarkWidth > info.width || watermarkHeight > info.height) {
+        const shrunk = await sharp(watermarkBuffer)
+            .resize({ width: info.width, height: info.height, fit: "inside" })
+            .toBuffer({ resolveWithObject: true });
+        watermarkBuffer = shrunk.data;
+        watermarkWidth = shrunk.info.width;
+        watermarkHeight = shrunk.info.height;
+    }
 
     const { left, top } = computeCornerOffset(
-        WATERMARK_POSITION, info.width, info.height, watermarkWidth, watermarkHeight, WATERMARK_MARGIN
+        watermark.position, info.width, info.height, watermarkWidth, watermarkHeight, watermark.margin
     );
 
     return sharp(resizedBuffer)
@@ -72,12 +88,32 @@ const buildPreview = async (imageBuffer, { watermark = true } = {}) => {
         .toBuffer();
 };
 
+let testPhotoBuffer = null;
+
+const loadTestPhoto = async () => {
+    testPhotoBuffer ??= await readFile(WATERMARK_TEST_PHOTO_PATH);
+    return testPhotoBuffer;
+};
+
+export const generateWatermarkSample = async (values) => {
+    const validated = await validateWatermarkValues(values ?? {});
+    const config = await buildWatermarkConfig({
+        watermarkKey: null,
+        watermarkPosition: null,
+        watermarkOpacity: null,
+        watermarkSize: null,
+        ...validated
+    });
+    return buildPreview(await loadTestPhoto(), { watermark: config });
+};
+
 export const generateDerivedImages = async (key, { watermark = true } = {}) => {
     const original = await s3Repository.getObject(key);
+    const watermarkConfig = watermark ? await buildWatermarkConfig(await loadSavedWatermarkValues()) : false;
 
     const [thumbnailBuffer, previewBuffer] = await Promise.all([
         buildThumbnail(original),
-        buildPreview(original, { watermark })
+        buildPreview(original, { watermark: watermarkConfig })
     ]);
 
     const thumbnailKey = deriveDerivedKey(key, "thumb");
