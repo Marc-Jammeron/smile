@@ -6,6 +6,10 @@ export const WATERMARK_SIZE_MIN = 10;
 export const WATERMARK_SIZE_MAX = 50;
 export const WATERMARK_STEP = 5;
 
+export const FONT_IDS = ['cormorant', 'playfair', 'lora', 'montserrat', 'dm-sans'];
+
+export const BRAND_MODES = ['logo', 'name', 'both'];
+
 export const MAX_BRANDING_FILE_BYTES = 2 * 1024 * 1024;
 export const MAX_BRANDING_DIMENSION = 2000;
 

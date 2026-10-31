@@ -2,6 +2,8 @@ import { useState, useEffect } from 'react'
 import Photo from 'front-shared/src/Photo.jsx'
 import PhotoLightbox from 'front-shared/src/PhotoLightbox.jsx'
 import { STATUS } from 'front-shared/src/constants/collectionStatus.js'
+import ClientGalleryHeader from 'front-shared/src/ClientGalleryHeader.jsx'
+import { buildBrandingStyle } from 'front-shared/src/brandingStyle.js'
 import { getClientGallery, updateClientPhotoSelection, validateClientSelection, downloadAllDeliveredPhotos } from '../api/publicGallery.js'
 import '../App.css'
 
@@ -11,7 +13,7 @@ const extractZipFilename = (contentDisposition, fallback) => {
 }
 
 const galleryLoadedState = (data) => ({
-    loading: false, notFound: false, error: null, collection: data.collection, photos: data.photos, photographerName: data.photographerName
+    loading: false, notFound: false, error: null, collection: data.collection, photos: data.photos, photographerName: data.photographerName, branding: data.branding ?? null
 })
 
 const galleryErrorState = (error) => ({
@@ -23,7 +25,7 @@ const galleryErrorState = (error) => ({
 })
 
 export default function PublicGallery({ token }) {
-    const [state, setState] = useState({ loading: true, notFound: false, error: null, collection: null, photos: [], photographerName: null })
+    const [state, setState] = useState({ loading: true, notFound: false, error: null, collection: null, photos: [], photographerName: null, branding: null })
     const [validating, setValidating] = useState(false)
     const [validationError, setValidationError] = useState(null)
     const [lightboxIndex, setLightboxIndex] = useState(null)
@@ -116,31 +118,25 @@ export default function PublicGallery({ token }) {
         )
     }
 
-    const { collection, photos, photographerName } = state
+    const { collection, photos, photographerName, branding } = state
     const isSelecting = collection.status === STATUS.SELECTING
     const isReady = collection.status === STATUS.READY
     const selectedCount = photos.filter(photo => photo.status === 'SELECTED').length
     const canValidate = selectedCount >= collection.maxPhotos
 
     return (
-        <div className="client-gallery">
-            <div className="client-gallery-header">
-                {photographerName && (
-                    <div className="client-gallery-brand">
-                        <span className="client-gallery-brand-name">{photographerName}</span>
-                        <span className="client-gallery-brand-divider" />
-                        <span className="client-gallery-brand-tag">Photographe</span>
-                    </div>
-                )}
-                <h1 className="client-gallery-title">{collection.name}</h1>
-                <p className="client-gallery-subtitle">
-                    {isSelecting
-                        ? `Choisissez ${collection.maxPhotos} photos parmi la sélection ci-dessous — ${selectedCount} sélectionnée${selectedCount > 1 ? 's' : ''} pour l'instant`
-                        : isReady
-                            ? 'Vos photos retouchées sont prêtes — cliquez sur une photo pour l\'agrandir ou téléchargez-les'
-                            : 'Votre sélection a été validée — cette galerie est en lecture seule'}
-                </p>
-            </div>
+        <div className="client-gallery" style={buildBrandingStyle(branding)}>
+            <ClientGalleryHeader
+                branding={branding}
+                photographerName={photographerName}
+                title={collection.name}
+                showWelcome={isSelecting}
+                subtitle={isSelecting
+                    ? `Choisissez ${collection.maxPhotos} photos parmi la sélection ci-dessous — ${selectedCount} sélectionnée${selectedCount > 1 ? 's' : ''} pour l'instant`
+                    : isReady
+                        ? 'Vos photos retouchées sont prêtes — cliquez sur une photo pour l\'agrandir ou téléchargez-les'
+                        : 'Votre sélection a été validée — cette galerie est en lecture seule'}
+            />
 
             <div className="client-gallery-body">
                 {photos.length === 0 ? (

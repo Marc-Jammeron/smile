@@ -916,67 +916,12 @@
 .client-gallery {
   min-height: 100svh;
   width: 100%;
-  background: oklch(97.5% 0.006 80);
-  font-family: 'Work Sans', var(--sans);
 
   & > .status-message {
     color: oklch(45% 0.01 80);
     text-align: center;
     padding: 96px 32px;
   }
-}
-
-.client-gallery-header {
-  max-width: 760px;
-  margin: 0 auto;
-  padding: 56px 32px 0;
-  box-sizing: border-box;
-  text-align: center;
-}
-
-.client-gallery-brand {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 48px;
-}
-
-.client-gallery-brand-name {
-  font-family: 'Cormorant Garamond', serif;
-  font-size: 28px;
-  font-weight: 500;
-  letter-spacing: 6px;
-  color: oklch(18% 0.005 80);
-  text-transform: uppercase;
-}
-
-.client-gallery-brand-divider {
-  width: 120px;
-  height: 1px;
-  background: oklch(85% 0.01 80);
-}
-
-.client-gallery-brand-tag {
-  font-size: 12px;
-  font-weight: 600;
-  letter-spacing: 3px;
-  color: oklch(60% 0.07 235);
-  text-transform: uppercase;
-}
-
-.client-gallery-title {
-  margin: 0 0 10px;
-  font-family: 'Cormorant Garamond', serif;
-  font-weight: 500;
-  font-size: 38px;
-  color: oklch(18% 0.005 80);
-}
-
-.client-gallery-subtitle {
-  margin: 0 0 40px;
-  font-size: 14.5px;
-  color: oklch(45% 0.01 80);
 }
 
 .client-gallery-body {
@@ -995,7 +940,7 @@
 }
 
 .client-validate-button {
-  font-family: 'Cormorant Garamond', serif;
+  font-family: var(--font-heading);
   font-size: 17px;
   font-weight: 500;
   letter-spacing: 1px;

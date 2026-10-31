@@ -1,0 +1,83 @@
+/* En-tête de la vue client, partagé entre front-client et l'aperçu de front-admin. */
+
+.client-gallery {
+  /* Défauts de la vue client ; surchargés en style en ligne quand un réglage est présent (brandingStyle.js). */
+  --color-bg: oklch(97.5% 0.006 80);
+  --font-heading: 'Cormorant Garamond', serif;
+  --font-body: 'Work Sans', var(--sans);
+
+  background: var(--color-bg);
+  font-family: var(--font-body);
+}
+
+.client-gallery-header {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 56px 32px 0;
+  box-sizing: border-box;
+  text-align: center;
+}
+
+.client-gallery-brand {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 48px;
+}
+
+.client-gallery-brand-name {
+  font-family: var(--font-heading);
+  font-size: 28px;
+  font-weight: 500;
+  letter-spacing: 6px;
+  color: oklch(18% 0.005 80);
+  text-transform: uppercase;
+  overflow-wrap: anywhere;
+}
+
+.client-gallery-brand-logo {
+  display: block;
+  /* Hauteur fixée (et non maximale) : un petit logo est agrandi lui aussi. */
+  height: 140px;
+  width: auto;
+  max-width: 100%;
+  object-fit: contain;
+}
+
+.client-gallery-brand-divider {
+  width: 120px;
+  height: 1px;
+  background: oklch(85% 0.01 80);
+}
+
+.client-gallery-brand-tag {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 3px;
+  color: oklch(60% 0.07 235);
+  text-transform: uppercase;
+  overflow-wrap: anywhere;
+}
+
+.client-gallery-title {
+  margin: 0 0 10px;
+  font-family: var(--font-heading);
+  font-weight: 500;
+  font-size: 38px;
+  color: oklch(18% 0.005 80);
+}
+
+.client-gallery-welcome {
+  margin: 0 0 10px;
+  font-size: 16px;
+  line-height: 1.5;
+  color: oklch(45% 0.01 80);
+  overflow-wrap: anywhere;
+}
+
+.client-gallery-subtitle {
+  margin: 0 0 40px;
+  font-size: 14.5px;
+  color: oklch(45% 0.01 80);
+}
