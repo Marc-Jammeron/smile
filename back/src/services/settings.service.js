@@ -11,19 +11,39 @@ import {
     WATERMARK_STEP,
     MAX_BRANDING_FILE_BYTES,
     MAX_BRANDING_DIMENSION,
+    FONT_IDS,
+    BRAND_MODES,
     getOriginalWatermarkValues
 } from './settings.constants.js';
 
 
 const SETTINGS_ID = 1;
 const WATERMARK_FIELDS = ['watermarkKey', 'watermarkPosition', 'watermarkOpacity', 'watermarkSize'];
+const BRANDING_FIELDS = ['logoKey', 'displayName', 'tagline', 'welcomeMessage', 'fontId', 'colorBg', 'brandMode', 'showTagline'];
+const SETTINGS_FIELDS = [...WATERMARK_FIELDS, ...BRANDING_FIELDS];
+
+const ASSET_KEY_FIELDS = ['watermarkKey', 'logoKey'];
+
+const TEXT_LIMITS = { displayName: 40, tagline: 40, welcomeMessage: 280 };
+const TEXT_LABELS = { displayName: "Nom affiché", tagline: "Sous-titre", welcomeMessage: "Message d'accueil" };
+const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/;
+const COLOR_REGEX = /^#[0-9a-fA-F]{6}$/;
 
 const UUID_PATTERN = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
 const WATERMARK_KEY_REGEX = new RegExp(`^branding/watermark/${UUID_PATTERN}\\.png$`);
+const LOGO_KEY_REGEX = new RegExp(`^branding/logo/${UUID_PATTERN}\\.(png|jpg|webp)$`);
 
-// Un seul type de fichier au lot 1. Le lot 2 ajoutera `logo` ici.
 const ASSET_KINDS = {
-    watermark: { contentType: 'image/png', format: 'png', formatError: 'Le fichier doit être un PNG' }
+    watermark: {
+        contentTypes: ['image/png'],
+        formats: { png: 'png' },
+        formatError: 'Le fichier doit être un PNG'
+    },
+    logo: {
+        contentTypes: ['image/png', 'image/jpeg', 'image/webp'],
+        formats: { png: 'png', jpeg: 'jpg', webp: 'webp' },
+        formatError: 'Le fichier doit être un PNG, un JPEG ou un WebP'
+    }
 };
 
 const createError = (status, message) => Object.assign(new Error(message), { status });
@@ -32,12 +52,31 @@ const badRequest = (message) => createError(400, message);
 const isSteppedInteger = (value, min, max) =>
     Number.isInteger(value) && value >= min && value <= max && value % WATERMARK_STEP === 0;
 
-export const validateWatermarkValues = async (values) => {
+const validateText = (field, value) => {
+    if (value === null) {
+        return null;
+    }
+    const label = TEXT_LABELS[field];
+    if (typeof value !== 'string') {
+        throw badRequest(`${label} invalide`);
+    }
+    if (CONTROL_CHARACTERS.test(value)) {
+        throw badRequest(`${label} : caractères non autorisés`);
+    }
+    const trimmed = value.trim();
+    // Points de code, pas unités UTF-16 : un emoji compte pour un caractère.
+    if ([...trimmed].length > TEXT_LIMITS[field]) {
+        throw badRequest(`${label} trop long (${TEXT_LIMITS[field]} caractères maximum)`);
+    }
+    return trimmed === '' ? null : trimmed;
+};
+
+export const validateSettingsValues = async (values, allowedFields = SETTINGS_FIELDS) => {
     if (values === null || typeof values !== 'object' || Array.isArray(values)) {
         throw badRequest('Requête invalide');
     }
 
-    const unknownKeys = Object.keys(values).filter(key => !WATERMARK_FIELDS.includes(key));
+    const unknownKeys = Object.keys(values).filter(key => !allowedFields.includes(key));
     if (unknownKeys.length > 0) {
         throw badRequest(`Réglage inconnu : ${unknownKeys.join(', ')}`);
     }
@@ -81,8 +120,61 @@ export const validateWatermarkValues = async (values) => {
         validated.watermarkSize = watermarkSize;
     }
 
+    if ('logoKey' in values) {
+        const { logoKey } = values;
+        if (logoKey !== null) {
+            if (typeof logoKey !== 'string' || !LOGO_KEY_REGEX.test(logoKey)) {
+                throw badRequest('Logo invalide');
+            }
+            if (!(await s3Repository.objectExists(logoKey))) {
+                throw badRequest('Logo introuvable');
+            }
+        }
+        validated.logoKey = logoKey;
+    }
+
+    for (const field of Object.keys(TEXT_LIMITS)) {
+        if (field in values) {
+            validated[field] = validateText(field, values[field]);
+        }
+    }
+
+    if ('fontId' in values) {
+        const { fontId } = values;
+        if (fontId !== null && !FONT_IDS.includes(fontId)) {
+            throw badRequest('Police invalide');
+        }
+        validated.fontId = fontId;
+    }
+
+    if ('colorBg' in values) {
+        const { colorBg } = values;
+        if (colorBg !== null && (typeof colorBg !== 'string' || !COLOR_REGEX.test(colorBg))) {
+            throw badRequest('Couleur de fond invalide (format #rrggbb)');
+        }
+        validated.colorBg = colorBg === null ? null : colorBg.toLowerCase();
+    }
+
+    if ('brandMode' in values) {
+        const { brandMode } = values;
+        if (brandMode !== null && !BRAND_MODES.includes(brandMode)) {
+            throw badRequest("Affichage de l'en-tête invalide");
+        }
+        validated.brandMode = brandMode;
+    }
+
+    if ('showTagline' in values) {
+        const { showTagline } = values;
+        if (showTagline !== null && typeof showTagline !== 'boolean') {
+            throw badRequest('Affichage du sous-titre invalide');
+        }
+        validated.showTagline = showTagline;
+    }
+
     return validated;
 };
+
+export const validateWatermarkValues = (values) => validateSettingsValues(values, WATERMARK_FIELDS);
 
 const findRow = () => db.GallerySettings.findByPk(SETTINGS_ID);
 
@@ -112,18 +204,42 @@ export const buildWatermarkConfig = async (values) => {
     };
 };
 
-const toSettingsDTO = (row) => {
+const toSettingsDTO = async (row) => {
     const original = getOriginalWatermarkValues();
     return {
         watermarkKey: row?.watermarkKey ?? null,
         watermarkPosition: row?.watermarkPosition ?? original.position,
         watermarkOpacity: row?.watermarkOpacity ?? Math.round(original.opacity * 100),
         watermarkSize: row?.watermarkSize ?? null,
+        logoKey: row?.logoKey ?? null,
+        displayName: row?.displayName ?? null,
+        tagline: row?.tagline ?? null,
+        welcomeMessage: row?.welcomeMessage ?? null,
+        fontId: row?.fontId ?? null,
+        colorBg: row?.colorBg ?? null,
+        brandMode: row?.brandMode ?? null,
+        showTagline: row?.showTagline ?? null,
+        logoUrl: row?.logoKey ? await s3Repository.getSignedDownloadUrl(row.logoKey) : null,
+        photographerName: process.env.PHOTOGRAPHER_DISPLAY_NAME || null,
         updatedAt: row?.updatedAt ? new Date(row.updatedAt).toISOString() : null
     };
 };
 
 export const getSettings = async () => toSettingsDTO(await findRow());
+
+export const getClientBranding = async () => {
+    const row = await findRow();
+    return {
+        logoUrl: row?.logoKey ? await s3Repository.getSignedDownloadUrl(row.logoKey) : null,
+        displayName: row?.displayName ?? null,
+        tagline: row?.tagline ?? null,
+        welcomeMessage: row?.welcomeMessage ?? null,
+        fontId: row?.fontId ?? null,
+        colorBg: row?.colorBg ?? null,
+        brandMode: row?.brandMode ?? null,
+        showTagline: row?.showTagline ?? null
+    };
+};
 
 const deleteObjectQuietly = async (key) => {
     try {
@@ -135,7 +251,7 @@ const deleteObjectQuietly = async (key) => {
 
 const writeSettings = async (values) => {
     const row = await findRow();
-    const previousKey = row?.watermarkKey ?? null;
+    const previousKeys = Object.fromEntries(ASSET_KEY_FIELDS.map(field => [field, row?.[field] ?? null]));
 
     if (row) {
         await row.update(values);
@@ -143,15 +259,18 @@ const writeSettings = async (values) => {
         await db.GallerySettings.create({ id: SETTINGS_ID, ...values });
     }
 
-    if ('watermarkKey' in values && previousKey && previousKey !== values.watermarkKey) {
-        await deleteObjectQuietly(previousKey);
+    for (const field of ASSET_KEY_FIELDS) {
+        const previousKey = previousKeys[field];
+        if (field in values && previousKey && previousKey !== values[field]) {
+            await deleteObjectQuietly(previousKey);
+        }
     }
 
     return getSettings();
 };
 
 export const updateSettings = async (partial) => {
-    const values = await validateWatermarkValues(partial);
+    const values = await validateSettingsValues(partial);
     if (Object.keys(values).length === 0) {
         return getSettings();
     }
@@ -171,6 +290,14 @@ export const resetWatermark = async () => {
     });
 };
 
+export const resetLogo = async () => {
+    const row = await findRow();
+    if (!row) {
+        return getSettings();
+    }
+    return writeSettings({ logoKey: null });
+};
+
 const getAssetKind = (kind) => {
     const config = Object.hasOwn(ASSET_KINDS, kind) ? ASSET_KINDS[kind] : null;
     if (!config) {
@@ -181,7 +308,7 @@ const getAssetKind = (kind) => {
 
 export const getUploadUrl = async (kind, contentType) => {
     const config = getAssetKind(kind);
-    if (contentType !== config.contentType) {
+    if (!config.contentTypes.includes(contentType)) {
         throw badRequest(config.formatError);
     }
     return s3Repository.getSignedBrandingUploadUrl(kind, contentType);
@@ -212,7 +339,8 @@ export const confirmUpload = async (kind, key) => {
         } catch {
             throw badRequest('Fichier illisible');
         }
-        if (metadata.format !== config.format) {
+        const extension = Object.hasOwn(config.formats, metadata.format) ? config.formats[metadata.format] : null;
+        if (!extension) {
             throw badRequest(config.formatError);
         }
         if (metadata.width > MAX_BRANDING_DIMENSION || metadata.height > MAX_BRANDING_DIMENSION) {
@@ -222,14 +350,14 @@ export const confirmUpload = async (kind, key) => {
         let reencoded;
         try {
             reencoded = await sharp(raw, { limitInputPixels: MAX_BRANDING_DIMENSION * MAX_BRANDING_DIMENSION })
-                .png()
+                .toFormat(metadata.format)
                 .toBuffer();
         } catch {
             throw badRequest('Fichier illisible');
         }
 
-        const finalKey = `branding/${kind}/${randomUUID()}.png`;
-        await s3Repository.putObject(finalKey, reencoded, 'image/png');
+        const finalKey = `branding/${kind}/${randomUUID()}.${extension}`;
+        await s3Repository.putObject(finalKey, reencoded, `image/${metadata.format}`);
         await s3Repository.deleteObject(key);
         return { key: finalKey };
     } catch (error) {

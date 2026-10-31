@@ -1,4 +1,4 @@
-import { getSettings, updateSettings, resetWatermark, getUploadUrl, confirmUpload } from '../services/settings.service.js';
+import { getSettings, updateSettings, resetWatermark, resetLogo, getUploadUrl, confirmUpload } from '../services/settings.service.js';
 import { generateWatermarkSample } from '../services/image-processing.service.js';
 
 const sendError = (res, error, fallbackMessage) => {
@@ -57,5 +57,13 @@ export const resetWatermarkSettings = async (req, res) => {
         res.json(await resetWatermark());
     } catch (error) {
         sendError(res, error, 'Failed to reset watermark');
+    }
+};
+
+export const resetLogoSettings = async (req, res) => {
+    try {
+        res.json(await resetLogo());
+    } catch (error) {
+        sendError(res, error, 'Failed to remove logo');
     }
 };

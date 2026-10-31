@@ -2,7 +2,7 @@ import './App.css'
 import { useState, useEffect } from 'react'
 import Gallery from './components/Gallery.jsx'
 import Login from './components/Login.jsx'
-import WatermarkSettings from './components/WatermarkSettings.jsx'
+import SettingsPage from './components/SettingsPage.jsx'
 import { login, logout, getCurrentPhotographer } from './api/auth.js'
 
 function App() {
@@ -44,7 +44,7 @@ function App() {
         </button>
         <button className="back-button" onClick={handleLogout}>Déconnexion</button>
       </div>
-      {view === 'gallery' ? <Gallery /> : <WatermarkSettings />}
+      {view === 'gallery' ? <Gallery /> : <SettingsPage />}
     </>
   )
 }

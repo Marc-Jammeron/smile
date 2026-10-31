@@ -1,6 +1,7 @@
 import { getAllClientPhotosByCollectionId, getDeliveredPhotosByCollectionId, updatePhotoSelectionStatus } from '../services/photo.service.js';
 import { markCollectionAsViewed, streamDeliveredZip } from '../services/collection.service.js';
 import { validateCollectionSelection } from '../services/client.service.js';
+import { getClientBranding } from '../services/settings.service.js';
 
 export const getClientGallery = async (req, res) => {
     try {
@@ -10,7 +11,13 @@ export const getClientGallery = async (req, res) => {
         const photos = req.collection.status === 'READY'
             ? await getDeliveredPhotosByCollectionId(req.collection.id)
             : await getAllClientPhotosByCollectionId(req.collection.id);
-        res.json({ collection: req.collection, photos, photographerName: process.env.PHOTOGRAPHER_DISPLAY_NAME || null });
+        let branding = null;
+        try {
+            branding = await getClientBranding();
+        } catch (error) {
+            console.error('Failed to load client branding:', error);
+        }
+        res.json({ collection: req.collection, photos, photographerName: process.env.PHOTOGRAPHER_DISPLAY_NAME || null, branding });
     } catch (error) {
         res.status(500).json({ error: 'Failed to fetch gallery' });
     }

@@ -61,3 +61,6 @@ export const previewWatermark = async (values, signal) => {
 
 export const resetWatermark = () =>
     requestJson('/settings/watermark', { method: 'DELETE' }, 'Impossible de revenir au watermark par défaut')
+
+export const deleteLogo = () =>
+    requestJson('/settings/logo', { method: 'DELETE' }, 'Impossible de retirer le logo')

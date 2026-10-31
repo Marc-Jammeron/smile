@@ -23,6 +23,38 @@ export default (sequelize, DataTypes) => {
             type: DataTypes.INTEGER,
             allowNull: true
         },
+        logoKey: {
+            type: DataTypes.STRING,
+            allowNull: true
+        },
+        displayName: {
+            type: DataTypes.STRING(40),
+            allowNull: true
+        },
+        tagline: {
+            type: DataTypes.STRING(40),
+            allowNull: true
+        },
+        welcomeMessage: {
+            type: DataTypes.STRING(280),
+            allowNull: true
+        },
+        fontId: {
+            type: DataTypes.STRING,
+            allowNull: true
+        },
+        colorBg: {
+            type: DataTypes.STRING(7),
+            allowNull: true
+        },
+        brandMode: {
+            type: DataTypes.STRING,
+            allowNull: true
+        },
+        showTagline: {
+            type: DataTypes.BOOLEAN,
+            allowNull: true
+        },
         updatedAt: {
             type: DataTypes.DATE,
             defaultValue: DataTypes.NOW
