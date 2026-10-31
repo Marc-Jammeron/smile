@@ -4,6 +4,7 @@ import db from './src/repository/db.repository.js';
 import { collectionRouter } from './src/router/collection.router.js';
 import { photoRouter } from './src/router/photo.router.js';
 import { authRouter } from './src/router/auth.router.js';
+import { settingsRouter } from './src/router/settings.router.js';
 import { clientRouter } from './src/router/client.router.js';
 import { requireAuth, verifyOrigin } from './src/middleware/auth.middleware.js';
 import { createAdminCors, createClientCors } from './src/config/cors.js';
@@ -33,6 +34,7 @@ app.use('/auth', adminCors, authRouter);
 app.use('/client', clientCors, clientRouter);
 app.use('/collections', adminCors, requireAuth, verifyOrigin, collectionRouter);
 app.use('/photos', adminCors, requireAuth, verifyOrigin, photoRouter);
+app.use('/settings', adminCors, requireAuth, verifyOrigin, settingsRouter);
 
 app.get('/', (req, res) => {
     res.send('Hello World!');

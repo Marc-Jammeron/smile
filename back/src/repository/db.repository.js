@@ -5,6 +5,7 @@ import path from "path";
 import CollectionModel from "../model/collection.model.js";
 import PhotoModel from "../model/photos.model.js";
 import PhotoAttachmentModel from "../model/photo-attachment.model.js";
+import GallerySettingsModel from "../model/gallery-settings.model.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -54,6 +55,7 @@ try {
 const Collection = CollectionModel(sequelize, DataTypes);
 const Photo = PhotoModel(sequelize, DataTypes);
 const PhotoAttachment = PhotoAttachmentModel(sequelize, DataTypes);
+const GallerySettings = GallerySettingsModel(sequelize, DataTypes);
 
 Collection.hasMany(Photo, { foreignKey: "collectionId" });
 Photo.belongsTo(Collection, { foreignKey: "collectionId" });
@@ -66,7 +68,8 @@ const db = {
     umzug,
     Collection,
     Photo,
-    PhotoAttachment
+    PhotoAttachment,
+    GallerySettings
 };
 
 export default db;

@@ -31,7 +31,7 @@ before(async () => {
 
 after(() => new Promise(resolve => server.close(resolve)));
 
-const ADMIN_PATHS = ['/auth/me', '/collections', '/photos/collection/1'];
+const ADMIN_PATHS = ['/auth/me', '/collections', '/photos/collection/1', '/settings'];
 const CLIENT_PATH = '/client/sometoken';
 
 const request = (path, origin, method = 'GET') =>

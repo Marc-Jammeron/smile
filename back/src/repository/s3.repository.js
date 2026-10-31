@@ -15,16 +15,19 @@ const s3 = new S3Client({
 
 const BUCKET = process.env.S3_BUCKET;
 
-const getSignedUploadUrl = async (collectionId, filename, contentType) => {
-    const key = `uploads/${collectionId}/${uuid()}-${filename}`;
-
+const getSignedPutUrl = (key, contentType) => {
     const command = new PutObjectCommand({
         Bucket: BUCKET,
         Key: key,
         ContentType: contentType,
     });
 
-    const url = await getSignedUrl(s3, command, { expiresIn: 300 });
+    return getSignedUrl(s3, command, { expiresIn: 300 });
+};
+
+const getSignedUploadUrl = async (collectionId, filename, contentType) => {
+    const key = `uploads/${collectionId}/${uuid()}-${filename}`;
+    const url = await getSignedPutUrl(key, contentType);
     return { url, key };
 };
 
@@ -32,14 +35,13 @@ const getSignedUploadUrl = async (collectionId, filename, contentType) => {
 // can never collide with a Photo's own key.
 const getSignedAttachmentUploadUrl = async (collectionId, filename, contentType) => {
     const key = `attachments/${collectionId}/${uuid()}-${filename}`;
+    const url = await getSignedPutUrl(key, contentType);
+    return { url, key };
+};
 
-    const command = new PutObjectCommand({
-        Bucket: BUCKET,
-        Key: key,
-        ContentType: contentType,
-    });
-
-    const url = await getSignedUrl(s3, command, { expiresIn: 300 });
+const getSignedBrandingUploadUrl = async (kind, contentType) => {
+    const key = `branding/${kind}/raw/${uuid()}`;
+    const url = await getSignedPutUrl(key, contentType);
     return { url, key };
 };
 
@@ -106,6 +108,23 @@ const objectExists = async (key) => {
     }
 };
 
+const headObject = async (key) => {
+    const command = new HeadObjectCommand({
+        Bucket: BUCKET,
+        Key: key,
+    });
+
+    try {
+        const { ContentLength, ContentType } = await s3.send(command);
+        return { size: ContentLength, contentType: ContentType };
+    } catch (error) {
+        if (error.name === 'NotFound' || error.$metadata?.httpStatusCode === 404) {
+            return null;
+        }
+        throw error;
+    }
+};
+
 const deleteObject = async (key) => {
     const command = new DeleteObjectCommand({
         Bucket: BUCKET,
@@ -124,11 +143,13 @@ const deleteObject = async (key) => {
 const s3Repository = {
     getSignedUploadUrl,
     getSignedAttachmentUploadUrl,
+    getSignedBrandingUploadUrl,
     getSignedDownloadUrl,
     getObject,
     getObjectStream,
     putObject,
     objectExists,
+    headObject,
     deleteObject
 };
 
