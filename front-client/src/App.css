@@ -857,9 +857,9 @@
 }
 
 .lightbox-close-button {
-  position: absolute;
-  top: -44px;
-  right: 0;
+  position: fixed;
+  top: 16px;
+  right: 16px;
   width: 32px;
   height: 32px;
   display: flex;
@@ -931,6 +931,45 @@
   box-sizing: border-box;
 }
 
+/* Compteur de sélection : reste visible en haut à droite pendant le défilement. */
+.client-selection-counter {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  z-index: 20;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 8px 16px;
+  background: oklch(99% 0.004 80 / 0.92);
+  border: 1px solid oklch(18% 0.005 80 / 0.25);
+  border-radius: 2px;
+  backdrop-filter: blur(6px);
+  color: oklch(18% 0.005 80);
+
+  &.is-complete {
+    border-color: oklch(65% 0.14 145);
+  }
+
+  @media (max-width: 640px) {
+    top: 8px;
+    right: 8px;
+    padding: 6px 12px;
+  }
+}
+
+.client-selection-counter-value {
+  font-family: var(--font-heading);
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+}
+
+.client-selection-counter-label {
+  font-size: 13px;
+  color: oklch(45% 0.01 80);
+}
+
 .client-gallery-actions {
   display: flex;
   flex-direction: column;
@@ -941,19 +980,32 @@
 
 .client-validate-button {
   font-family: var(--font-heading);
-  font-size: 17px;
-  font-weight: 500;
+  font-size: 21px;
+  font-weight: 600;
   letter-spacing: 1px;
-  color: oklch(18% 0.005 80);
-  background: oklch(85% 0.05 235);
+  color: oklch(97.5% 0.006 80);
+  background: oklch(18% 0.005 80);
   border: 1px solid oklch(18% 0.005 80);
   border-radius: 2px;
   padding: 14px 40px;
   cursor: pointer;
+  transition: background 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease;
+
+  &:hover:not(:disabled) {
+    background: oklch(38% 0.01 80);
+    transform: translateY(-4px) scale(1.04);
+    box-shadow: 0 12px 28px oklch(18% 0.005 80 / 0.35);
+  }
+
+  &:active:not(:disabled) {
+    transform: translateY(0);
+    box-shadow: none;
+  }
 
   &:disabled {
     color: oklch(60% 0.01 80);
     background: oklch(93% 0.006 80);
+    border-color: oklch(85% 0.006 80);
     cursor: not-allowed;
   }
 }

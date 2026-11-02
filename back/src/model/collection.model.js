@@ -11,21 +11,17 @@ export default (sequelize, DataTypes) => {
             type: DataTypes.STRING,
             allowNull: false
         },
-        clientEmail: {
-            type: DataTypes.STRING,
-            allowNull: false
-        },
         clientName: {
             type: DataTypes.STRING,
             allowNull: false
         },
+        clientMessage: {
+            type: DataTypes.TEXT,
+            allowNull: true
+        },
         status: {
             type: DataTypes.ENUM('DRAFT', 'SELECTING', 'EDITING', 'READY', 'ARCHIVED'),
             defaultValue: 'DRAFT'
-        },
-        description: {
-            type: DataTypes.TEXT,
-            allowNull: true
         },
         createdAt: {
             type: DataTypes.DATE,

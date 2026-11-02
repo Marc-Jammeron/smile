@@ -64,3 +64,8 @@ export function groupFilesForUpload(files, existingPhotos = []) {
         }
     })
 }
+
+const compareFilenames = (a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' })
+
+export const sortGroupsForUpload = (groups) =>
+    [...groups].sort((a, b) => compareFilenames(a.mainFile?.name ?? a.stem, b.mainFile?.name ?? b.stem))

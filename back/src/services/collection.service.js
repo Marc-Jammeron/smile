@@ -8,7 +8,8 @@ import { getSelectedPhotosForCollection, getDeliveredPhotosForZip, getPhotoDownl
 export const getAllCollections = async () => {
     try {
         const collections = await db.Collection.findAll({
-            include: db.Photo
+            include: db.Photo,
+            order: [[db.Photo, 'position', 'ASC'], [db.Photo, 'id', 'ASC']]
         });
         return collections;
     } catch (error) {
@@ -20,7 +21,8 @@ export const getAllCollections = async () => {
 export const getCollectionById = async (id) => {
     try {
         const collection = await db.Collection.findByPk(id, {
-            include: db.Photo
+            include: db.Photo,
+            order: [[db.Photo, 'position', 'ASC'], [db.Photo, 'id', 'ASC']]
         });
         return collection;
     } catch (error) {
@@ -39,8 +41,22 @@ export const createCollection = async (collectionData) => {
     }
 };
 
+export const CLIENT_MESSAGE_MAX_LENGTH = 500;
+
 export const updateCollection = async (id, collectionData) => {
     try {
+        if ('clientMessage' in collectionData) {
+            const clientMessage = typeof collectionData.clientMessage === 'string'
+                ? collectionData.clientMessage.trim() || null
+                : null;
+            if (clientMessage && clientMessage.length > CLIENT_MESSAGE_MAX_LENGTH) {
+                const error = new Error(`Le message client ne peut pas dépasser ${CLIENT_MESSAGE_MAX_LENGTH} caractères.`);
+                error.status = 400;
+                throw error;
+            }
+            collectionData = { ...collectionData, clientMessage };
+        }
+
         if (collectionData.status === 'SELECTING') {
             const collection = await db.Collection.findByPk(id);
             if (collection && !collection.accessToken) {
@@ -61,14 +77,38 @@ export const updateCollection = async (id, collectionData) => {
     }
 };
 
-export const softDeleteCollection = async (id) => {
+// Permanently removes a collection and everything attached to it: S3 objects
+// (originals, thumbnails, previews, RAW/XMP attachments, and any orphaned upload
+// under the collection's prefixes), DB rows (Photos and PhotoAttachments go through
+// the FKs' ON DELETE CASCADE) and, since the access token lives on the collection
+// row, the client link. S3 goes first and any failure aborts before the DB is
+// touched: the collection stays visible and the delete can simply be retried, rather
+// than leaving unreachable files in the bucket with no row left to point at them.
+export const deleteCollection = async (id) => {
     try {
-        const [updatedRows] = await db.Collection.update({ status: 'ARCHIVED' }, {
-            where: { id }
-        });
-        return updatedRows > 0;
+        const collection = await db.Collection.findByPk(id);
+        if (!collection) {
+            return false;
+        }
+
+        const photos = await db.Photo.findAll({ where: { collectionId: id } });
+        const attachments = await getAttachmentsForPhotos(photos.map((photo) => photo.id));
+        const keys = [
+            ...photos.flatMap((photo) => [photo.key, photo.thumbnailKey, photo.previewKey]),
+            ...attachments.map((attachment) => attachment.s3Key)
+        ].filter(Boolean);
+
+        for (const key of keys) {
+            await s3Repository.deleteObject(key);
+        }
+        // Catches whatever the DB doesn't know about (unconfirmed uploads, leftovers).
+        await s3Repository.deleteByPrefix(`uploads/${id}/`);
+        await s3Repository.deleteByPrefix(`attachments/${id}/`);
+
+        await db.Collection.destroy({ where: { id } });
+        return true;
     } catch (error) {
-        console.error(`Error soft deleting collection with id ${id}:`, error);
+        console.error(`Error deleting collection with id ${id}:`, error);
         throw error;
     }
 };

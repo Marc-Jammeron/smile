@@ -1,10 +1,14 @@
 export const WATERMARK_POSITIONS = ['northwest', 'northeast', 'center', 'southwest', 'southeast'];
 
 export const WATERMARK_OPACITY_MIN = 10;
-export const WATERMARK_OPACITY_MAX = 80;
+export const WATERMARK_OPACITY_MAX = 100;
 export const WATERMARK_SIZE_MIN = 10;
-export const WATERMARK_SIZE_MAX = 50;
+export const WATERMARK_SIZE_MAX = 100;
 export const WATERMARK_STEP = 5;
+
+export const WATERMARK_TEXT_MAX_LINES = 3;
+export const WATERMARK_TEXT_MAX_LINE_LENGTH = 40;
+export const WATERMARK_TEXT_DEFAULT_SIZE = 30;
 
 export const FONT_IDS = ['cormorant', 'playfair', 'lora', 'montserrat', 'dm-sans'];
 

@@ -3,13 +3,19 @@ import Photo from 'front-shared/src/Photo.jsx'
 import PhotoUploadForm from './PhotoUploadForm.jsx'
 import { apiFetch } from '../api/http.js'
 
-const extractZipFilename = (contentDisposition, fallback) => {
+const CLIENT_MESSAGE_MAX_LENGTH = 500
+
+const extractZipFilename =(contentDisposition, fallback) => {
     const match = contentDisposition?.match(/filename="?([^";]+)"?/)
     return match ? match[1] : fallback
 }
 
-export default function PhotoList({ collection, photos, loading, onBack, onAddPhotos, onDeletePhoto, onDeleteDeliveredPhoto, onUpdatePhotoStatus, onRevokeAccess, onMarkReady }) {
+export default function PhotoList({ collection, photos, loading, onBack, onAddPhotos, onDeletePhoto, onDeleteDeliveredPhoto, onUpdatePhotoStatus, onRevokeAccess, onUpdateClientMessage, onMarkReady, onDeleteCollection }) {
     const [showForm, setShowForm] = useState(false)
+    const [clientMessage, setClientMessage] = useState(collection.clientMessage ?? '')
+    const [savingMessage, setSavingMessage] = useState(false)
+    const [messageSaved, setMessageSaved] = useState(false)
+    const [messageError, setMessageError] = useState(null)
     const [showDeliveredForm, setShowDeliveredForm] = useState(false)
     const [copied, setCopied] = useState(false)
     const [revoking, setRevoking] = useState(false)
@@ -17,6 +23,8 @@ export default function PhotoList({ collection, photos, loading, onBack, onAddPh
     const [downloadError, setDownloadError] = useState(null)
     const [markingReady, setMarkingReady] = useState(false)
     const [markReadyError, setMarkReadyError] = useState(null)
+    const [deleting, setDeleting] = useState(false)
+    const [deleteError, setDeleteError] = useState(null)
     const canSelect = collection.status === 'SELECTING'
     const canAddPhotos = !['EDITING', 'READY', 'ARCHIVED'].includes(collection.status)
     const isEditing = collection.status === 'EDITING'
@@ -59,6 +67,26 @@ export default function PhotoList({ collection, photos, loading, onBack, onAddPh
         }
     }
 
+    const savedClientMessage = collection.clientMessage ?? ''
+    const clientMessageChanged = clientMessage.trim() !== savedClientMessage
+
+    const handleSaveClientMessage = async () => {
+        setSavingMessage(true)
+        setMessageError(null)
+        setMessageSaved(false)
+        try {
+            await onUpdateClientMessage(collection.id, clientMessage)
+            setClientMessage(clientMessage.trim())
+            setMessageSaved(true)
+            setTimeout(() => setMessageSaved(false), 2000)
+        } catch (error) {
+            console.error('Error saving client message:', error)
+            setMessageError(error.message)
+        } finally {
+            setSavingMessage(false)
+        }
+    }
+
     const handleCopyLink = async () => {
         try {
             await navigator.clipboard.writeText(clientGalleryUrl)
@@ -80,6 +108,29 @@ export default function PhotoList({ collection, photos, loading, onBack, onAddPh
             alert("La révocation de l'accès a échoué")
         } finally {
             setRevoking(false)
+        }
+    }
+
+    const handleDeleteCollection = async () => {
+        const photoCount = photos.length
+        const confirmed = window.confirm(
+            `⚠️ Suppression définitive de la galerie « ${collection.name} »\n\n` +
+            `Seront supprimés sans possibilité de récupération :\n` +
+            `• les ${photoCount} photo${photoCount > 1 ? 's' : ''} (originaux, miniatures, aperçus, fichiers RAW/XMP) stockées sur S3\n` +
+            `• le lien client, qui ne fonctionnera plus\n` +
+            `• la sélection et l'historique de la galerie\n\n` +
+            `Supprimer cette galerie ?`
+        )
+        if (!confirmed) return
+
+        setDeleting(true)
+        setDeleteError(null)
+        try {
+            await onDeleteCollection(collection.id)
+        } catch (error) {
+            console.error('Error deleting collection:', error)
+            setDeleteError(error.message)
+            setDeleting(false)
         }
     }
 
@@ -136,6 +187,14 @@ export default function PhotoList({ collection, photos, loading, onBack, onAddPh
                         Voir comme client
                     </a>
                 )}
+                <button
+                    type="button"
+                    className="button-outline button-outline-danger"
+                    onClick={handleDeleteCollection}
+                    disabled={deleting}
+                >
+                    {deleting ? 'Suppression...' : 'Supprimer la galerie'}
+                </button>
                 {collection.status === 'EDITING' && (
                     <button
                         type="button"
@@ -155,10 +214,41 @@ export default function PhotoList({ collection, photos, loading, onBack, onAddPh
                     </button>
                 )}
             </div>
+            {deleteError && (
+                <div className="toast toast-error" role="alert">
+                    <span>{deleteError}</span>
+                    <button type="button" className="toast-dismiss" onClick={() => setDeleteError(null)} aria-label="Fermer">×</button>
+                </div>
+            )}
             {downloadError && (
                 <div className="toast toast-error" role="alert">
                     <span>{downloadError}</span>
                     <button type="button" className="toast-dismiss" onClick={() => setDownloadError(null)} aria-label="Fermer">×</button>
+                </div>
+            )}
+            {collection.status === 'SELECTING' && canViewAsClient && (
+                <div className="client-message-box">
+                    <label htmlFor="client-message">Message pour le client (optionnel, markdown : **gras**, *italique*, listes, [liens](https://…)) — n'hésite pas à demander à ChatGPT de mettre ton texte au format md avant de le copier-coller</label>
+                    <textarea
+                        id="client-message"
+                        value={clientMessage}
+                        onChange={(event) => setClientMessage(event.target.value)}
+                        maxLength={CLIENT_MESSAGE_MAX_LENGTH}
+                        rows={3}
+                        placeholder="Affiché en haut de la galerie du client pendant la sélection"
+                    />
+                    <div className="client-message-actions">
+                        <span className="client-message-counter">{clientMessage.length}/{CLIENT_MESSAGE_MAX_LENGTH}</span>
+                        {messageError && <span className="form-error">{messageError}</span>}
+                        <button
+                            type="button"
+                            className="button-outline"
+                            onClick={handleSaveClientMessage}
+                            disabled={savingMessage || (!clientMessageChanged && !messageSaved)}
+                        >
+                            {savingMessage ? 'Enregistrement...' : messageSaved ? 'Enregistré !' : 'Enregistrer'}
+                        </button>
+                    </div>
                 </div>
             )}
             {collection.status === 'SELECTING' && clientGalleryUrl && (

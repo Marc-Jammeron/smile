@@ -18,6 +18,8 @@ const assertCollectionAcceptsAttachments = async (collectionId) => {
     }
 };
 
+const PHOTO_ORDER = [['position', 'ASC'], ['id', 'ASC']];
+
 const toPhotoDTO = async (photo) => {
     const { key, thumbnailKey, previewKey } = photo;
     const [url, thumbnailUrl, previewUrl] = await Promise.all([
@@ -49,6 +51,7 @@ export const getAllPhotosByCollectionId = async (collectionId) => {
                 collectionId,
                 status: ['PENDING', 'SELECTED', 'REJECTED', 'DELIVERED'],
             },
+            order: PHOTO_ORDER,
         });
         return Promise.all(photos.map(toPhotoDTO));
     } catch (error) {
@@ -64,6 +67,7 @@ export const getAllClientPhotosByCollectionId = async (collectionId) => {
                 collectionId,
                 status: ['PENDING', 'SELECTED', 'REJECTED'],
             },
+            order: PHOTO_ORDER,
         });
         return Promise.all(photos.map(toClientPhotoDTO));
     } catch (error) {
@@ -158,7 +162,7 @@ const confirmAttachmentForExistingPhoto = async (attachmentData, photoId) => {
 
 // Extension is checked here (not just at grouping time on the client) so a CR2
 // submitted as a main photo item can never reach generateDerivedImages/sharp.
-const confirmPhoto = async (photoData, targetStatus) => {
+const confirmPhoto = async (photoData, targetStatus, position) => {
     try {
         const { collectionId, key, contentType, size, description, filename, attachments = [] } = photoData;
 
@@ -181,7 +185,7 @@ const confirmPhoto = async (photoData, targetStatus) => {
 
         const { thumbnailKey, previewKey } = await generateDerivedImages(key, { watermark: targetStatus !== 'DELIVERED' });
 
-        const newPhoto = await db.Photo.create({ collectionId, key, thumbnailKey, previewKey, contentType, size, description, originalFilename: filename, status: targetStatus });
+        const newPhoto = await db.Photo.create({ collectionId, key, thumbnailKey, previewKey, contentType, size, description, originalFilename: filename, status: targetStatus, position });
 
         const attachmentResults = await Promise.allSettled(
             attachments.map((attachmentData) => confirmAttachment(attachmentData, newPhoto.id))
@@ -198,12 +202,23 @@ const confirmPhoto = async (photoData, targetStatus) => {
     }
 };
 
+const getNextPosition = async (collectionId) => {
+    const maxPosition = await db.Photo.max('position', { where: { collectionId } });
+    return Number.isFinite(maxPosition) ? maxPosition + 1 : 0;
+};
+
 export const confirmPhotosBatch = async ({ photos = [], attachmentsToExistingPhotos = [], targetStatus = 'PENDING' }) => {
     if (targetStatus === 'DELIVERED' && photos.length > 0) {
         await assertCollectionInEditingStatus(photos[0].collectionId);
     }
 
-    const photoResults = await Promise.allSettled(photos.map((photoData) => confirmPhoto(photoData, targetStatus)));
+    // Positions come from the order of `photos` (the client sends them sorted), not
+    // from the order the parallel confirmations finish. The base continues after the
+    // collection's existing photos; chunks of one upload are confirmed sequentially,
+    // so each chunk's base picks up where the previous one ended.
+    const basePosition = photos.length > 0 ? await getNextPosition(photos[0].collectionId) : 0;
+
+    const photoResults = await Promise.allSettled(photos.map((photoData, index) => confirmPhoto(photoData, targetStatus, basePosition + index)));
 
     const created = [];
     const failed = [];
@@ -294,7 +309,8 @@ export const updatePhotoSelectionStatus = async (id, status) => {
 export const getSelectedPhotosForCollection = async (collectionId) => {
     try {
         return await db.Photo.findAll({
-            where: { collectionId, status: 'SELECTED' }
+            where: { collectionId, status: 'SELECTED' },
+            order: PHOTO_ORDER
         });
     } catch (error) {
         console.error(`Error fetching selected photos for collection with id ${collectionId}:`, error);
@@ -323,7 +339,8 @@ export const getAttachmentsForPhotos = async (photoIds, options = {}) => {
 export const getDeliveredPhotosForZip = async (collectionId) => {
     try {
         return await db.Photo.findAll({
-            where: { collectionId, status: 'DELIVERED' }
+            where: { collectionId, status: 'DELIVERED' },
+            order: PHOTO_ORDER
         });
     } catch (error) {
         console.error(`Error fetching delivered photos for collection with id ${collectionId}:`, error);
@@ -377,6 +394,7 @@ export const getDeliveredPhotosByCollectionId = async (collectionId) => {
                 collectionId,
                 status: 'DELIVERED',
             },
+            order: PHOTO_ORDER,
         });
         return Promise.all(photos.map(toPhotoDTO));
     } catch (error) {

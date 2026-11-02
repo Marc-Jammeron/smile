@@ -57,10 +57,10 @@ const rejects = (promise, message) =>
     assert.rejects(promise, (error) => error.status === 400 && (!message || error.message.includes(message)));
 
 test('validation rejects out-of-range, off-step and mistyped values', async () => {
-    for (const watermarkOpacity of [5, 85, 62, '60']) {
+    for (const watermarkOpacity of [5, 105, 62, '60']) {
         await rejects(validateSettingsValues({ watermarkOpacity }));
     }
-    for (const watermarkSize of [5, 55, 12]) {
+    for (const watermarkSize of [5, 105, 12]) {
         await rejects(validateSettingsValues({ watermarkSize }));
     }
     await rejects(validateSettingsValues({ watermarkPosition: 'north' }));
@@ -75,13 +75,35 @@ test('validation accepts null and valid values', async () => {
     assert.deepEqual(await validateSettingsValues(values), values);
 
     s3Objects.set(FINAL_KEY, { buffer: Buffer.alloc(1), size: 1 });
-    const valid = { watermarkKey: FINAL_KEY, watermarkPosition: 'center', watermarkOpacity: 80, watermarkSize: 10 };
+    const valid = { watermarkKey: FINAL_KEY, watermarkPosition: 'center', watermarkOpacity: 100, watermarkSize: 100 };
     assert.deepEqual(await validateSettingsValues(valid), valid);
+});
+
+test('watermark text is validated, trimmed and normalised', async () => {
+    const text = async (watermarkText) => (await validateSettingsValues({ watermarkText })).watermarkText;
+    assert.equal(await text(null), null);
+    assert.equal(await text('  \n  '), null);
+    assert.equal(await text('\n+++\r\n EMMA MARSH \n+++\n'), '+++\nEMMA MARSH\n+++');
+    assert.equal(await text('é'.repeat(40)), 'é'.repeat(40));
+    await rejects(validateSettingsValues({ watermarkText: 12 }));
+    await rejects(validateSettingsValues({ watermarkText: 'a\u0000b' }));
+    await rejects(validateSettingsValues({ watermarkText: 'a\nb\nc\nd' }), '3 lignes');
+    await rejects(validateSettingsValues({ watermarkText: 'a'.repeat(41) }), '40 caractères');
+});
+
+test('buildWatermarkConfig renders the text instead of the image, with a default size', async () => {
+    s3Objects.set(FINAL_KEY, { buffer: Buffer.from('not-a-png'), size: 9 });
+    const config = await buildWatermarkConfig({ watermarkKey: FINAL_KEY, watermarkText: 'EMMA MARSH', watermarkSize: null });
+    const { width, height, format } = await sharp(config.image).metadata();
+    assert.equal(format, 'png');
+    assert.ok(width > height);
+    assert.equal(config.size, 30);
+    assert.equal((await buildWatermarkConfig({ watermarkText: 'EMMA', watermarkSize: 15 })).size, 15);
 });
 
 test('getSettings falls back to the original values when there is no row', async () => {
     assert.deepEqual(await getSettings(), {
-        watermarkKey: null, watermarkPosition: 'southeast', watermarkOpacity: 60, watermarkSize: null,
+        watermarkKey: null, watermarkText: null, watermarkPosition: 'southeast', watermarkOpacity: 60, watermarkSize: null,
         logoKey: null, displayName: null, tagline: null, welcomeMessage: null, fontId: null, colorBg: null,
         brandMode: null, showTagline: null, logoUrl: null, photographerName: null, updatedAt: null,
     });
@@ -119,11 +141,11 @@ test('resetWatermark nulls everything, deletes the object, and is idempotent wit
     assert.equal((await resetWatermark()).watermarkOpacity, 60);
 
     s3Objects.set(FINAL_KEY, { buffer: Buffer.alloc(1), size: 1 });
-    row = makeRow({ id: 1, watermarkKey: FINAL_KEY, watermarkPosition: 'center', watermarkOpacity: 30, watermarkSize: 20 });
+    row = makeRow({ id: 1, watermarkKey: FINAL_KEY, watermarkText: 'EMMA', watermarkPosition: 'center', watermarkOpacity: 30, watermarkSize: 20 });
     const settings = await resetWatermark();
     assert.deepEqual(
-        [settings.watermarkKey, settings.watermarkPosition, settings.watermarkOpacity, settings.watermarkSize],
-        [null, 'southeast', 60, null]
+        [settings.watermarkKey, settings.watermarkText, settings.watermarkPosition, settings.watermarkOpacity, settings.watermarkSize],
+        [null, null, 'southeast', 60, null]
     );
     assert.deepEqual(deleted, [FINAL_KEY]);
 });

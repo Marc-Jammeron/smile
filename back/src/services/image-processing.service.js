@@ -14,8 +14,8 @@ const WATERMARK_TEST_PHOTO_PATH = fileURLToPath(new URL("../../assets/watermark-
 
 const deriveDerivedKey = (key, suffix) => `${key.replace(/\.[^./]+$/, "")}-${suffix}.jpg`;
 
-const buildThumbnail = (imageBuffer) =>
-    sharp(imageBuffer)
+const buildThumbnail = (previewBuffer) =>
+    sharp(previewBuffer)
         .resize({ width: THUMBNAIL_WIDTH })
         .jpeg({ quality: THUMBNAIL_JPEG_QUALITY })
         .toBuffer();
@@ -99,6 +99,7 @@ export const generateWatermarkSample = async (values) => {
     const validated = await validateWatermarkValues(values ?? {});
     const config = await buildWatermarkConfig({
         watermarkKey: null,
+        watermarkText: null,
         watermarkPosition: null,
         watermarkOpacity: null,
         watermarkSize: null,
@@ -111,10 +112,8 @@ export const generateDerivedImages = async (key, { watermark = true } = {}) => {
     const original = await s3Repository.getObject(key);
     const watermarkConfig = watermark ? await buildWatermarkConfig(await loadSavedWatermarkValues()) : false;
 
-    const [thumbnailBuffer, previewBuffer] = await Promise.all([
-        buildThumbnail(original),
-        buildPreview(original, { watermark: watermarkConfig })
-    ]);
+    const previewBuffer = await buildPreview(original, { watermark: watermarkConfig });
+    const thumbnailBuffer = await buildThumbnail(previewBuffer);
 
     const thumbnailKey = deriveDerivedKey(key, "thumb");
     const previewKey = deriveDerivedKey(key, "preview");

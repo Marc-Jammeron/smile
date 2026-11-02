@@ -1,4 +1,4 @@
-import { getAllCollections, getCollectionById, createCollection, updateCollection, softDeleteCollection, revokeCollectionAccess, streamSelectionHdZip, markCollectionAsReady } from '../services/collection.service.js';
+import { getAllCollections, getCollectionById, createCollection, updateCollection, deleteCollection, revokeCollectionAccess, streamSelectionHdZip, markCollectionAsReady } from '../services/collection.service.js';
 
 export const getAllCollectionsController = async (req, res) => {
     try {
@@ -42,21 +42,21 @@ export const updateExistingCollectionController = async (req, res) => {
             res.status(404).json({ error: 'Collection not found' });
         }
     } catch (error) {
-        res.status(500).json({ error: 'Failed to update collection' });
+        res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed to update collection' });
     }
 };
 
-export const softDeleteCollectionByIdController = async (req, res) => {
+export const deleteCollectionByIdController = async (req, res) => {
     const { id } = req.params;
     try {
-        const deleted = await softDeleteCollection(id);
+        const deleted = await deleteCollection(id);
         if (deleted) {
-            res.json({ message: 'Collection soft deleted successfully' });
+            res.json({ message: 'Collection deleted successfully' });
         } else {
             res.status(404).json({ error: 'Collection not found' });
         }
     } catch (error) {
-        res.status(500).json({ error: 'Failed to soft delete collection' });
+        res.status(500).json({ error: 'Failed to delete collection' });
     }
 };
 

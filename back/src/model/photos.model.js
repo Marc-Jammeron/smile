@@ -37,6 +37,11 @@ export default (sequelize, DataTypes) => {
             type: DataTypes.TEXT,
             allowNull: true
         },
+        position: {
+            type: DataTypes.INTEGER,
+            allowNull: false,
+            defaultValue: 0
+        },
         status: {
             type: DataTypes.ENUM('PENDING', 'SELECTED', 'REJECTED', 'ARCHIVED', 'DELIVERED'),
             defaultValue: 'PENDING'
