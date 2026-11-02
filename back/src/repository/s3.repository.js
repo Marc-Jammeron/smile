@@ -1,4 +1,4 @@
-import { S3Client, PutObjectCommand, GetObjectCommand, HeadObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
+import { S3Client, PutObjectCommand, GetObjectCommand, HeadObjectCommand, DeleteObjectCommand, DeleteObjectsCommand, ListObjectsV2Command } from "@aws-sdk/client-s3";
 import { Buffer } from "node:buffer";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { v4 as uuid } from "uuid";
@@ -140,6 +140,37 @@ const deleteObject = async (key) => {
     }
 };
 
+const deleteByPrefix = async (prefix) => {
+    if (!prefix) {
+        throw new Error('deleteByPrefix requires a non-empty prefix');
+    }
+
+    let deleted = 0;
+    let continuationToken;
+    do {
+        const { Contents = [], IsTruncated, NextContinuationToken } = await s3.send(new ListObjectsV2Command({
+            Bucket: BUCKET,
+            Prefix: prefix,
+            ContinuationToken: continuationToken,
+        }));
+
+        if (Contents.length > 0) {
+            const { Errors = [] } = await s3.send(new DeleteObjectsCommand({
+                Bucket: BUCKET,
+                Delete: { Objects: Contents.map(({ Key }) => ({ Key })), Quiet: true },
+            }));
+            if (Errors.length > 0) {
+                throw new Error(`Failed to delete ${Errors.length} object(s) under prefix ${prefix}: ${Errors[0].Message}`);
+            }
+            deleted += Contents.length;
+        }
+
+        continuationToken = IsTruncated ? NextContinuationToken : undefined;
+    } while (continuationToken);
+
+    return deleted;
+};
+
 const s3Repository = {
     getSignedUploadUrl,
     getSignedAttachmentUploadUrl,
@@ -150,7 +181,8 @@ const s3Repository = {
     putObject,
     objectExists,
     headObject,
-    deleteObject
+    deleteObject,
+    deleteByPrefix
 };
 
 export default s3Repository;

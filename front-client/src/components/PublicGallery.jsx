@@ -126,13 +126,24 @@ export default function PublicGallery({ token }) {
 
     return (
         <div className="client-gallery" style={buildBrandingStyle(branding)}>
+            {isSelecting && (
+                <div
+                    className={`client-selection-counter${canValidate ? ' is-complete' : ''}`}
+                    role="status"
+                    aria-live="polite"
+                >
+                    <span className="client-selection-counter-value">{selectedCount} / {collection.maxPhotos}</span>
+                    <span className="client-selection-counter-label">sélectionnée{selectedCount > 1 ? 's' : ''}</span>
+                </div>
+            )}
             <ClientGalleryHeader
                 branding={branding}
                 photographerName={photographerName}
                 title={collection.name}
                 showWelcome={isSelecting}
+                clientMessage={isSelecting ? collection.clientMessage : null}
                 subtitle={isSelecting
-                    ? `Choisissez ${collection.maxPhotos} photos parmi la sélection ci-dessous — ${selectedCount} sélectionnée${selectedCount > 1 ? 's' : ''} pour l'instant`
+                    ? null
                     : isReady
                         ? 'Vos photos retouchées sont prêtes — cliquez sur une photo pour l\'agrandir ou téléchargez-les'
                         : 'Votre sélection a été validée — cette galerie est en lecture seule'}

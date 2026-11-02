@@ -29,6 +29,11 @@ const fakePhoto = {
 };
 
 let lastCreatedPhotoData = null;
+let createdPhotosData = [];
+let lastFindAllOptions = null;
+let currentMaxPosition = null;
+let lastMaxArgs = null;
+let processingDelayByKey = {};
 let currentCollectionStatus = 'SELECTING';
 let currentFindByPkPhoto = fakePhoto;
 let destroyedWhere = null;
@@ -40,10 +45,18 @@ let createdAttachmentData = [];
 mock.module('../src/repository/db.repository.js', {
     defaultExport: {
         Photo: {
-            findAll: async () => [fakePhoto],
+            findAll: async (options) => {
+                lastFindAllOptions = options;
+                return [fakePhoto];
+            },
+            max: async (column, options) => {
+                lastMaxArgs = { column, options };
+                return currentMaxPosition;
+            },
             findByPk: async () => currentFindByPkPhoto,
             create: async (data) => {
                 lastCreatedPhotoData = data;
+                createdPhotosData.push(data);
                 return { ...fakePhoto, ...data, toJSON() { return { ...fakePhoto.toJSON(), ...data }; } };
             },
             destroy: async ({ where }) => {
@@ -81,12 +94,13 @@ mock.module('../src/services/image-processing.service.js', {
     namedExports: {
         generateDerivedImages: async (key, options) => {
             lastGenerateDerivedImagesCall = { key, options };
+            await new Promise((resolve) => setTimeout(resolve, processingDelayByKey[key] ?? 0));
             return { thumbnailKey: THUMBNAIL_KEY, previewKey: PREVIEW_KEY };
         },
     },
 });
 
-const { getAllClientPhotosByCollectionId, getAllPhotosByCollectionId, confirmPhotosBatch, getPhotoDownloadFilename, deleteDeliveredPhoto } = await import('../src/services/photo.service.js');
+const { getAllClientPhotosByCollectionId, getAllPhotosByCollectionId, getDeliveredPhotosByCollectionId, getSelectedPhotosForCollection, getDeliveredPhotosForZip, confirmPhotosBatch, getPhotoDownloadFilename, deleteDeliveredPhoto } = await import('../src/services/photo.service.js');
 
 test('getAllClientPhotosByCollectionId (client gallery path) never presigns the original S3 key', async () => {
     const [photo] = await getAllClientPhotosByCollectionId('collection-1');
@@ -120,6 +134,73 @@ test('confirmPhotosBatch persists the uploaded filename as originalFilename', as
     });
 
     assert.equal(lastCreatedPhotoData.originalFilename, 'IMG_0042.jpg');
+});
+
+const POSITION_ORDER = [['position', 'ASC'], ['id', 'ASC']];
+
+test('admin, client and delivered listings sort photos by position, then id', async () => {
+    for (const list of [getAllPhotosByCollectionId, getAllClientPhotosByCollectionId, getDeliveredPhotosByCollectionId]) {
+        lastFindAllOptions = null;
+        await list('collection-1');
+        assert.deepEqual(lastFindAllOptions.order, POSITION_ORDER, `${list.name} should order by position`);
+    }
+});
+
+test('selected and delivered zip listings sort photos by position, then id', async () => {
+    for (const list of [getSelectedPhotosForCollection, getDeliveredPhotosForZip]) {
+        lastFindAllOptions = null;
+        await list('collection-1');
+        assert.deepEqual(lastFindAllOptions.order, POSITION_ORDER, `${list.name} should order by position`);
+    }
+});
+
+const makeBatch = (count) => Array.from({ length: count }, (_, index) => ({
+    collectionId: 'collection-1', key: `uploads/collection-1/${index}.jpg`, contentType: 'image/jpeg', size: 10, filename: `IMG_${index}.jpg`,
+}));
+
+test('confirmPhotosBatch starts positions at 0 in an empty collection and follows the array order', async () => {
+    createdPhotosData = [];
+    currentMaxPosition = null;
+
+    await confirmPhotosBatch({ photos: makeBatch(3) });
+
+    assert.deepEqual(lastMaxArgs, { column: 'position', options: { where: { collectionId: 'collection-1' } } });
+    assert.deepEqual(createdPhotosData.map((photo) => [photo.originalFilename, photo.position]), [
+        ['IMG_0.jpg', 0], ['IMG_1.jpg', 1], ['IMG_2.jpg', 2],
+    ]);
+});
+
+test('confirmPhotosBatch continues after the highest existing position of the collection', async () => {
+    createdPhotosData = [];
+    currentMaxPosition = 6;
+
+    await confirmPhotosBatch({ photos: makeBatch(2) });
+
+    assert.deepEqual(createdPhotosData.map((photo) => photo.position), [7, 8]);
+});
+
+test('confirmPhotosBatch does not depend on the completion order of the parallel processing', async () => {
+    createdPhotosData = [];
+    currentMaxPosition = null;
+    processingDelayByKey = { 'uploads/collection-1/0.jpg': 30 };
+
+    await confirmPhotosBatch({ photos: makeBatch(2) });
+    processingDelayByKey = {};
+
+    // IMG_1 finishes first (created first) yet keeps its later position.
+    assert.deepEqual(createdPhotosData.map((photo) => [photo.originalFilename, photo.position]), [
+        ['IMG_1.jpg', 1], ['IMG_0.jpg', 0],
+    ]);
+});
+
+test('confirmPhotosBatch gives DELIVERED photos positions after the existing ones of their collection', async () => {
+    createdPhotosData = [];
+    currentMaxPosition = 4;
+    currentCollectionStatus = 'EDITING';
+
+    await confirmPhotosBatch({ photos: makeBatch(2), targetStatus: 'DELIVERED' });
+
+    assert.deepEqual(createdPhotosData.map((photo) => photo.position), [5, 6]);
 });
 
 test('getPhotoDownloadFilename uses originalFilename when present', () => {

@@ -6,11 +6,12 @@ import sharp from 'sharp';
 // Les deux sont mockés ; buildPreview est appelé directement avec une config de watermark.
 let loadSavedCalls = 0;
 let putObjects = [];
+let putBodies = {};
 
 mock.module('../src/repository/s3.repository.js', {
     defaultExport: {
         getObject: async () => originalBuffer,
-        putObject: async (key, body) => { putObjects.push(key); return key; },
+        putObject: async (key, body) => { putObjects.push(key); putBodies[key] = body; return key; },
     },
 });
 mock.module('../src/services/settings.service.js', {
@@ -130,4 +131,23 @@ test('generateDerivedImages reads the saved settings when watermark is true', as
     nextConfig = config();
     await generateDerivedImages('uploads/c/x.jpg', { watermark: true });
     assert.equal(loadSavedCalls, 1);
+});
+
+test('the thumbnail carries the watermark, scaled down with the image', async () => {
+    putBodies = {};
+    nextConfig = config({ size: 20 });
+    await generateDerivedImages('uploads/c/x.jpg', { watermark: true });
+    const { info, pixel } = await decode(putBodies['uploads/c/x-thumb.jpg']);
+    assert.equal(info.width, 400);
+    // size 20 % de 1200 = 240 px dans la preview -> 80 px dans la thumbnail ; marge 24 -> 8 px
+    const x = info.width - 8 - 40;
+    const y = info.height - 8 - 13;
+    assert.ok(isRed(pixel(x, y)));
+});
+
+test('the thumbnail has no watermark when watermark is false', async () => {
+    putBodies = {};
+    await generateDerivedImages('uploads/c/x.jpg', { watermark: false });
+    const { info, pixel } = await decode(putBodies['uploads/c/x-thumb.jpg']);
+    assert.ok(isWhite(pixel(info.width - 8 - 40, info.height - 8 - 13)));
 });

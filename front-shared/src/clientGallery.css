@@ -18,6 +18,10 @@
   text-align: center;
 }
 
+.client-gallery-header-compact {
+  padding-bottom: 30px;
+}
+
 .client-gallery-brand {
   display: flex;
   flex-direction: column;
@@ -55,7 +59,7 @@
   font-size: 12px;
   font-weight: 600;
   letter-spacing: 3px;
-  color: oklch(60% 0.07 235);
+  color: oklch(18% 0.005 80);
   text-transform: uppercase;
   overflow-wrap: anywhere;
 }
@@ -74,6 +78,46 @@
   line-height: 1.5;
   color: oklch(45% 0.01 80);
   overflow-wrap: anywhere;
+}
+
+.client-gallery-message {
+  margin: 0 0 10px;
+  font-size: 16px;
+  line-height: 1.5;
+  color: oklch(45% 0.01 80);
+  overflow-wrap: anywhere;
+}
+
+/* pre-wrap sur les blocs de texte seulement : garde les retours à la ligne simples du message
+   sans transformer les "\n" que react-markdown insère entre les blocs en espaces. */
+.client-gallery-message p,
+.client-gallery-message li {
+  white-space: pre-wrap;
+}
+
+.client-gallery-message p {
+  margin: 0 0 8px;
+}
+
+.client-gallery-message > :last-child {
+  margin-bottom: 0;
+}
+
+.client-gallery-message ul,
+.client-gallery-message ol {
+  margin: 0 0 8px;
+  padding-left: 1.4em;
+}
+
+.client-gallery-message blockquote {
+  margin: 0 0 8px;
+  padding-left: 12px;
+  border-left: 3px solid oklch(85% 0.01 80);
+}
+
+.client-gallery-message a {
+  color: inherit;
+  text-decoration: underline;
 }
 
 .client-gallery-subtitle {

@@ -11,6 +11,10 @@ export default (sequelize, DataTypes) => {
             type: DataTypes.STRING,
             allowNull: true
         },
+        watermarkText: {
+            type: DataTypes.STRING(130),
+            allowNull: true
+        },
         watermarkPosition: {
             type: DataTypes.ENUM(...WATERMARK_POSITIONS),
             allowNull: true

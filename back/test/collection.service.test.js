@@ -15,11 +15,28 @@ let collectionUpdateCalls = [];
 let deletedS3Keys = [];
 let transactionInvoked = false;
 let currentAttachmentsByPhotoId = {};
+let currentCollectionPhotos = [];
+let destroyedCollectionWhere = null;
+let deletedPrefixes = [];
+let failingS3Key = null;
+let photoFindAllOptions = [];
+let collectionFindOptions = [];
 
 mock.module('../src/repository/db.repository.js', {
     defaultExport: {
         Collection: {
-            findByPk: async () => currentCollection,
+            findByPk: async (_id, options) => {
+                collectionFindOptions.push(options);
+                return currentCollection;
+            },
+            findAll: async (options) => {
+                collectionFindOptions.push(options);
+                return [];
+            },
+            destroy: async ({ where }) => {
+                destroyedCollectionWhere = where;
+                return 1;
+            },
             update: async (data, options) => {
                 collectionUpdateCalls.push({ data, options });
                 if (currentCollection) {
@@ -29,7 +46,10 @@ mock.module('../src/repository/db.repository.js', {
             },
         },
         Photo: {
-            findAll: async ({ where }) => {
+            findAll: async (options) => {
+                const { where } = options;
+                photoFindAllOptions.push(options);
+                if (!('status' in where)) return currentCollectionPhotos;
                 if (where.status === 'SELECTED') return currentSelectedPhotos;
                 if (where.status === 'DELIVERED') return currentDeliveredPhotos;
                 return currentNonDeliveredPhotos; // { [Op.ne]: 'DELIVERED' } case
@@ -65,8 +85,13 @@ mock.module('../src/repository/s3.repository.js', {
             return Readable.from([Buffer.from(`content-of-${key}`)]);
         },
         deleteObject: async (key) => {
+            if (key === failingS3Key) throw new Error('S3 unavailable');
             deletedS3Keys.push(key);
             return true;
+        },
+        deleteByPrefix: async (prefix) => {
+            deletedPrefixes.push(prefix);
+            return 0;
         },
     },
 });
@@ -77,7 +102,7 @@ mock.module('../src/services/image-processing.service.js', {
     },
 });
 
-const { streamSelectionHdZip, markCollectionAsReady, streamDeliveredZip } = await import('../src/services/collection.service.js');
+const { streamSelectionHdZip, markCollectionAsReady, streamDeliveredZip, getAllCollections, getCollectionById, updateCollection, deleteCollection, CLIENT_MESSAGE_MAX_LENGTH } = await import('../src/services/collection.service.js');
 
 // Minimal stand-in for an Express `res`: a writable sink that flips `headersSent`
 // on the first chunk, mirroring how a real http.ServerResponse behaves once
@@ -305,4 +330,125 @@ test('streamDeliveredZip streams only the DELIVERED photos of the requested coll
     assert.equal(res.headers['Content-Type'], 'application/zip');
     assert.ok(res.headersSent, 'expected the zip bytes to have been written to the response');
     assert.ok(res.chunks.length > 0, 'expected at least one chunk of zip data');
+});
+
+test('updateCollection trims clientMessage and stores an empty one as null', async () => {
+    currentCollection = { id: 'c1', status: 'SELECTING' };
+    collectionUpdateCalls = [];
+
+    await updateCollection('c1', { clientMessage: '  Bonjour  ' });
+    assert.equal(collectionUpdateCalls[0].data.clientMessage, 'Bonjour');
+
+    await updateCollection('c1', { clientMessage: '   ' });
+    assert.equal(collectionUpdateCalls[1].data.clientMessage, null);
+
+    await updateCollection('c1', { clientMessage: null });
+    assert.equal(collectionUpdateCalls[2].data.clientMessage, null);
+});
+
+test('updateCollection rejects a clientMessage longer than the limit with a 400', async () => {
+    currentCollection = { id: 'c1', status: 'SELECTING' };
+    collectionUpdateCalls = [];
+
+    await assert.rejects(
+        () => updateCollection('c1', { clientMessage: 'a'.repeat(CLIENT_MESSAGE_MAX_LENGTH + 1) }),
+        (error) => {
+            assert.equal(error.status, 400);
+            return true;
+        }
+    );
+    assert.equal(collectionUpdateCalls.length, 0);
+});
+
+test('updateCollection leaves clientMessage untouched when it is not in the payload', async () => {
+    currentCollection = { id: 'c1', status: 'SELECTING' };
+    collectionUpdateCalls = [];
+
+    await updateCollection('c1', { name: 'New name' });
+    assert.equal('clientMessage' in collectionUpdateCalls[0].data, false);
+});
+
+
+test('deleteCollection removes every S3 object, sweeps the prefixes, then deletes the row', async () => {
+    currentCollection = { id: 'c1', status: 'READY' };
+    currentCollectionPhotos = [
+        { id: 1, key: 'uploads/c1/a.jpg', thumbnailKey: 'uploads/c1/a-thumb.jpg', previewKey: 'uploads/c1/a-preview.jpg' },
+        { id: 2, key: 'uploads/c1/b.jpg', thumbnailKey: null, previewKey: null },
+    ];
+    currentAttachmentsByPhotoId = { 1: [{ s3Key: 'attachments/c1/a.cr2' }] };
+    deletedS3Keys = [];
+    deletedPrefixes = [];
+    destroyedCollectionWhere = null;
+    failingS3Key = null;
+
+    assert.equal(await deleteCollection('c1'), true);
+
+    assert.deepEqual(deletedS3Keys.sort(), [
+        'attachments/c1/a.cr2',
+        'uploads/c1/a-preview.jpg',
+        'uploads/c1/a-thumb.jpg',
+        'uploads/c1/a.jpg',
+        'uploads/c1/b.jpg',
+    ]);
+    assert.deepEqual(deletedPrefixes, ['uploads/c1/', 'attachments/c1/']);
+    assert.deepEqual(destroyedCollectionWhere, { id: 'c1' });
+});
+
+test('deleteCollection returns false and touches nothing when the collection does not exist', async () => {
+    currentCollection = null;
+    deletedS3Keys = [];
+    deletedPrefixes = [];
+    destroyedCollectionWhere = null;
+
+    assert.equal(await deleteCollection('missing'), false);
+    assert.deepEqual(deletedS3Keys, []);
+    assert.deepEqual(deletedPrefixes, []);
+    assert.equal(destroyedCollectionWhere, null);
+});
+
+test('deleteCollection keeps the DB row when an S3 deletion fails, so it can be retried', async () => {
+    currentCollection = { id: 'c1', status: 'READY' };
+    currentCollectionPhotos = [{ id: 1, key: 'uploads/c1/a.jpg', thumbnailKey: null, previewKey: null }];
+    currentAttachmentsByPhotoId = {};
+    destroyedCollectionWhere = null;
+    failingS3Key = 'uploads/c1/a.jpg';
+
+    await assert.rejects(() => deleteCollection('c1'), /S3 unavailable/);
+    assert.equal(destroyedCollectionWhere, null);
+    failingS3Key = null;
+});
+
+
+const POSITION_ORDER = [['position', 'ASC'], ['id', 'ASC']];
+
+test('streamSelectionHdZip lists the SELECTED photos by position', async () => {
+    currentCollection = { id: 'col-1', name: 'Mariage Dupont', status: 'EDITING' };
+    currentSelectedPhotos = [{ id: 1, key: 'originals/photo-1.jpg', originalFilename: 'IMG_0001.jpg' }];
+    photoFindAllOptions = [];
+
+    await streamSelectionHdZip('col-1', new FakeResponse());
+
+    assert.deepEqual(photoFindAllOptions[0].order, POSITION_ORDER);
+});
+
+test('streamDeliveredZip lists the DELIVERED photos by position', async () => {
+    currentDeliveredPhotos = [{ id: 10, key: 'uploads/col-1/final-1.jpg', originalFilename: 'FINAL_0001.jpg' }];
+    photoFindAllOptions = [];
+
+    await streamDeliveredZip({ id: 'col-1', name: 'Mariage Dupont', status: 'READY' }, new FakeResponse());
+
+    assert.deepEqual(photoFindAllOptions[0].order, POSITION_ORDER);
+});
+
+test('getCollectionById and getAllCollections order the included photos by position', async () => {
+    currentCollection = { id: 'col-1' };
+    collectionFindOptions = [];
+
+    await getCollectionById('col-1');
+    await getAllCollections();
+
+    for (const { order } of collectionFindOptions) {
+        assert.deepEqual(order.map(([, column, direction]) => [column, direction]), POSITION_ORDER);
+    }
+    assert.equal(collectionFindOptions.length, 2);
 });

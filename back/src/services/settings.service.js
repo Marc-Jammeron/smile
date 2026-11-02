@@ -13,12 +13,16 @@ import {
     MAX_BRANDING_DIMENSION,
     FONT_IDS,
     BRAND_MODES,
+    WATERMARK_TEXT_MAX_LINES,
+    WATERMARK_TEXT_MAX_LINE_LENGTH,
+    WATERMARK_TEXT_DEFAULT_SIZE,
     getOriginalWatermarkValues
 } from './settings.constants.js';
+import { renderWatermarkText } from './watermark-text.service.js';
 
 
 const SETTINGS_ID = 1;
-const WATERMARK_FIELDS = ['watermarkKey', 'watermarkPosition', 'watermarkOpacity', 'watermarkSize'];
+const WATERMARK_FIELDS = ['watermarkKey', 'watermarkText', 'watermarkPosition', 'watermarkOpacity', 'watermarkSize'];
 const BRANDING_FIELDS = ['logoKey', 'displayName', 'tagline', 'welcomeMessage', 'fontId', 'colorBg', 'brandMode', 'showTagline'];
 const SETTINGS_FIELDS = [...WATERMARK_FIELDS, ...BRANDING_FIELDS];
 
@@ -71,6 +75,31 @@ const validateText = (field, value) => {
     return trimmed === '' ? null : trimmed;
 };
 
+const validateWatermarkText = (value) => {
+    if (value === null) {
+        return null;
+    }
+    if (typeof value !== 'string') {
+        throw badRequest('Texte du watermark invalide');
+    }
+    if (CONTROL_CHARACTERS.test(value.replace(/\r?\n/g, ''))) {
+        throw badRequest('Texte du watermark : caractères non autorisés');
+    }
+    const lines = value.split(/\r?\n/).map(line => line.trim());
+    while (lines.length > 0 && lines[0] === '') lines.shift();
+    while (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+    if (lines.length === 0) {
+        return null;
+    }
+    if (lines.length > WATERMARK_TEXT_MAX_LINES) {
+        throw badRequest(`Texte du watermark : ${WATERMARK_TEXT_MAX_LINES} lignes maximum`);
+    }
+    if (lines.some(line => [...line].length > WATERMARK_TEXT_MAX_LINE_LENGTH)) {
+        throw badRequest(`Texte du watermark : ${WATERMARK_TEXT_MAX_LINE_LENGTH} caractères maximum par ligne`);
+    }
+    return lines.join('\n');
+};
+
 export const validateSettingsValues = async (values, allowedFields = SETTINGS_FIELDS) => {
     if (values === null || typeof values !== 'object' || Array.isArray(values)) {
         throw badRequest('Requête invalide');
@@ -94,6 +123,10 @@ export const validateSettingsValues = async (values, allowedFields = SETTINGS_FI
             }
         }
         validated.watermarkKey = watermarkKey;
+    }
+
+    if ('watermarkText' in values) {
+        validated.watermarkText = validateWatermarkText(values.watermarkText);
     }
 
     if ('watermarkPosition' in values) {
@@ -182,24 +215,29 @@ export const loadSavedWatermarkValues = async () => {
     const row = await findRow();
     return {
         watermarkKey: row?.watermarkKey ?? null,
+        watermarkText: row?.watermarkText ?? null,
         watermarkPosition: row?.watermarkPosition ?? null,
         watermarkOpacity: row?.watermarkOpacity ?? null,
         watermarkSize: row?.watermarkSize ?? null
     };
 };
 
-// Config consommée par buildPreview. `values` suit la forme de loadSavedWatermarkValues.
 export const buildWatermarkConfig = async (values) => {
     const original = getOriginalWatermarkValues();
-    const image = values.watermarkKey
-        ? await s3Repository.getObject(values.watermarkKey)
-        : original.assetPath;
+    let image = original.assetPath;
+    let size = values.watermarkSize ?? null;
+    if (values.watermarkText) {
+        image = await renderWatermarkText(values.watermarkText);
+        size ??= WATERMARK_TEXT_DEFAULT_SIZE;
+    } else if (values.watermarkKey) {
+        image = await s3Repository.getObject(values.watermarkKey);
+    }
 
     return {
         image,
         position: values.watermarkPosition ?? original.position,
         opacity: values.watermarkOpacity != null ? values.watermarkOpacity / 100 : original.opacity,
-        size: values.watermarkSize ?? null,
+        size,
         margin: original.margin
     };
 };
@@ -208,6 +246,7 @@ const toSettingsDTO = async (row) => {
     const original = getOriginalWatermarkValues();
     return {
         watermarkKey: row?.watermarkKey ?? null,
+        watermarkText: row?.watermarkText ?? null,
         watermarkPosition: row?.watermarkPosition ?? original.position,
         watermarkOpacity: row?.watermarkOpacity ?? Math.round(original.opacity * 100),
         watermarkSize: row?.watermarkSize ?? null,
@@ -284,6 +323,7 @@ export const resetWatermark = async () => {
     }
     return writeSettings({
         watermarkKey: null,
+        watermarkText: null,
         watermarkPosition: null,
         watermarkOpacity: null,
         watermarkSize: null

@@ -4,8 +4,6 @@ import { STATUS_OPTIONS, STATUS_LABELS } from 'front-shared/src/constants/collec
 export default function CollectionForm({ onCreate, onCancel }) {
     const [name, setName] = useState('')
     const [clientName, setClientName] = useState('')
-    const [clientEmail, setClientEmail] = useState('')
-    const [description, setDescription] = useState('')
     const [status, setStatus] = useState('DRAFT')
     const [maxPhotos, setMaxPhotos] = useState('')
     const [submitting, setSubmitting] = useState(false)
@@ -13,7 +11,7 @@ export default function CollectionForm({ onCreate, onCancel }) {
 
     const handleSubmit = async (event) => {
         event.preventDefault()
-        if (!name.trim() || !clientName.trim() || !clientEmail.trim()) return
+        if (!name.trim() || !clientName.trim()) return
 
         setSubmitting(true)
         setError(null)
@@ -21,8 +19,6 @@ export default function CollectionForm({ onCreate, onCancel }) {
             await onCreate({
                 name: name.trim(),
                 clientName: clientName.trim(),
-                clientEmail: clientEmail.trim(),
-                description: description.trim() || null,
                 status,
                 maxPhotos: maxPhotos === '' ? 0 : Number(maxPhotos)
             })
@@ -50,19 +46,6 @@ export default function CollectionForm({ onCreate, onCancel }) {
                 onChange={(event) => setClientName(event.target.value)}
                 required
             />
-            <input
-                type="email"
-                placeholder="Email du client"
-                value={clientEmail}
-                onChange={(event) => setClientEmail(event.target.value)}
-                required
-            />
-            <textarea
-                placeholder="Description (optionnel)"
-                value={description}
-                onChange={(event) => setDescription(event.target.value)}
-                rows={2}
-            />
             <div className="collection-form-row">
                 <label>
                     Statut
@@ -88,7 +71,7 @@ export default function CollectionForm({ onCreate, onCancel }) {
                 <button type="button" className="back-button" onClick={onCancel} disabled={submitting}>
                     Annuler
                 </button>
-                <button type="submit" className="create-button" disabled={submitting || !name.trim() || !clientName.trim() || !clientEmail.trim()}>
+                <button type="submit" className="create-button" disabled={submitting || !name.trim() || !clientName.trim()}>
                     {submitting ? 'Création...' : 'Créer'}
                 </button>
             </div>

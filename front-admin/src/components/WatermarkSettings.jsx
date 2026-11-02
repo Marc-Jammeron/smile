@@ -11,17 +11,33 @@ const POSITION_OPTIONS = [
 
 const MAX_FILE_BYTES = 2 * 1024 * 1024
 const DEFAULT_SIZE = 30
+const TEXT_MAX_LINES = 3
+const TEXT_MAX_LINE_LENGTH = 40
 const PREVIEW_DEBOUNCE_MS = 300
 
 const toForm = (settings) => ({
     watermarkKey: settings.watermarkKey,
+    watermarkText: settings.watermarkText,
     watermarkPosition: settings.watermarkPosition,
     watermarkOpacity: settings.watermarkOpacity,
     watermarkSize: settings.watermarkSize
 })
 
+// Texte vide = pas de texte : le back retomberait sur l'image.
+const toPayload = (form) => ({ ...form, watermarkText: form.watermarkText?.trim() ? form.watermarkText : null })
+
+const textError = (text) => {
+    const lines = text.split('\n')
+    if (lines.length > TEXT_MAX_LINES) return `${TEXT_MAX_LINES} lignes maximum`
+    if (lines.some((line) => [...line].length > TEXT_MAX_LINE_LENGTH)) {
+        return `${TEXT_MAX_LINE_LENGTH} caractères maximum par ligne`
+    }
+    return null
+}
+
 const isSameForm = (a, b) =>
     a.watermarkKey === b.watermarkKey &&
+    a.watermarkText === b.watermarkText &&
     a.watermarkPosition === b.watermarkPosition &&
     a.watermarkOpacity === b.watermarkOpacity &&
     a.watermarkSize === b.watermarkSize
@@ -36,6 +52,7 @@ export default function WatermarkSettings() {
     const [uploading, setUploading] = useState(false)
     const [saving, setSaving] = useState(false)
     const lastSizeRef = useRef(DEFAULT_SIZE)
+    const lastTextRef = useRef('')
 
     useEffect(() => {
         getSettings()
@@ -52,7 +69,7 @@ export default function WatermarkSettings() {
         const controller = new AbortController()
         const timer = setTimeout(async () => {
             try {
-                const blob = await previewWatermark(form, controller.signal)
+                const blob = await previewWatermark(toPayload(form), controller.signal)
                 setPreviewUrl(URL.createObjectURL(blob))
                 setPreviewError(null)
             } catch (err) {
@@ -101,6 +118,17 @@ export default function WatermarkSettings() {
         }
     }
 
+    const isText = form.watermarkText !== null
+
+    const handleModeChange = (event) => {
+        if (event.target.value === 'text') {
+            update({ watermarkText: lastTextRef.current, watermarkSize: form.watermarkSize ?? lastSizeRef.current })
+        } else {
+            lastTextRef.current = form.watermarkText ?? ''
+            update({ watermarkText: null })
+        }
+    }
+
     const handleNativeSizeChange = (event) => {
         if (event.target.checked) {
             if (form.watermarkSize !== null) lastSizeRef.current = form.watermarkSize
@@ -114,7 +142,7 @@ export default function WatermarkSettings() {
         setSaving(true)
         setError(null)
         try {
-            const settings = await updateSettings(form)
+            const settings = await updateSettings(toPayload(form))
             setSaved(toForm(settings))
             setForm(toForm(settings))
         } catch (err) {
@@ -137,6 +165,8 @@ export default function WatermarkSettings() {
     }
 
     const isDirty = !isSameForm(form, saved)
+    const textValidationError = isText ? textError(form.watermarkText) : null
+    const textIsBlank = isText && !form.watermarkText.trim()
 
     return (
         <section className="watermark-settings">
@@ -144,14 +174,41 @@ export default function WatermarkSettings() {
 
             <div className="watermark-settings-layout">
                 <div className="collection-form">
-                    <label className="watermark-field">
-                        Image du watermark (PNG, 2 Mo maximum)
-                        <input type="file" accept="image/png" onChange={handleFileChange} disabled={uploading} />
-                    </label>
-                    {uploading && <p className="upload-file-count">Envoi en cours…</p>}
-                    {form.watermarkKey !== saved.watermarkKey && !uploading && (
-                        <p className="upload-file-count">Nouvelle image prête, à enregistrer.</p>
+                    <div className="watermark-field">
+                        Type de watermark
+                        <label className="watermark-checkbox">
+                            <input type="radio" name="watermark-mode" value="image" checked={!isText} onChange={handleModeChange} />
+                            Image
+                        </label>
+                        <label className="watermark-checkbox">
+                            <input type="radio" name="watermark-mode" value="text" checked={isText} onChange={handleModeChange} />
+                            Texte
+                        </label>
+                    </div>
+
+                    {isText ? (
+                        <label className="watermark-field">
+                            Texte du watermark ({TEXT_MAX_LINES} lignes de {TEXT_MAX_LINE_LENGTH} caractères maximum)
+                            <textarea
+                                rows={TEXT_MAX_LINES}
+                                value={form.watermarkText}
+                                placeholder={'+++++++++++++++++++\nEMMA MARSH PHOTOGRAPHE\n+++++++++++++++++++'}
+                                onChange={(event) => update({ watermarkText: event.target.value })}
+                            />
+                        </label>
+                    ) : (
+                        <>
+                            <label className="watermark-field">
+                                Image du watermark (PNG, 2 Mo maximum)
+                                <input type="file" accept="image/png" onChange={handleFileChange} disabled={uploading} />
+                            </label>
+                            {uploading && <p className="upload-file-count">Envoi en cours…</p>}
+                            {form.watermarkKey !== saved.watermarkKey && !uploading && (
+                                <p className="upload-file-count">Nouvelle image prête, à enregistrer.</p>
+                            )}
+                        </>
                     )}
+                    {textValidationError && <p className="form-error">{textValidationError}</p>}
 
                     <label className="watermark-field">
                         Position
@@ -170,7 +227,7 @@ export default function WatermarkSettings() {
                         <input
                             type="range"
                             min="10"
-                            max="80"
+                            max="100"
                             step="5"
                             value={form.watermarkOpacity}
                             onChange={(event) => update({ watermarkOpacity: Number(event.target.value) })}
@@ -179,25 +236,27 @@ export default function WatermarkSettings() {
 
                     <div className="watermark-field">
                         <label>
-                            Taille : {form.watermarkSize === null ? "taille d'origine" : `${form.watermarkSize} % de la largeur`}
+                            Taille : {form.watermarkSize === null && !isText ? "taille d'origine" : `${form.watermarkSize} % de la largeur`}
                             <input
                                 type="range"
                                 min="10"
-                                max="50"
+                                max="100"
                                 step="5"
                                 value={form.watermarkSize ?? lastSizeRef.current}
-                                disabled={form.watermarkSize === null}
+                                disabled={form.watermarkSize === null && !isText}
                                 onChange={(event) => update({ watermarkSize: Number(event.target.value) })}
                             />
                         </label>
-                        <label className="watermark-checkbox">
-                            <input
-                                type="checkbox"
-                                checked={form.watermarkSize === null}
-                                onChange={handleNativeSizeChange}
-                            />
-                            Taille d'origine
-                        </label>
+                        {!isText && (
+                            <label className="watermark-checkbox">
+                                <input
+                                    type="checkbox"
+                                    checked={form.watermarkSize === null}
+                                    onChange={handleNativeSizeChange}
+                                />
+                                Taille d'origine
+                            </label>
+                        )}
                     </div>
 
                     {error && <p className="form-error">{error}</p>}
@@ -210,7 +269,7 @@ export default function WatermarkSettings() {
                             type="button"
                             className="button-primary"
                             onClick={handleSave}
-                            disabled={saving || uploading || !isDirty}
+                            disabled={saving || uploading || !isDirty || textIsBlank || Boolean(textValidationError)}
                         >
                             {saving ? 'Enregistrement…' : 'Enregistrer'}
                         </button>

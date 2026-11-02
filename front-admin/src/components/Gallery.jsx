@@ -2,6 +2,7 @@ import CollectionList from './CollectionList.jsx'
 import PhotoList from './PhotoList.jsx'
 import { useState, useEffect } from 'react'
 import { runWithConcurrency } from '../utils/concurrency.js'
+import { sortGroupsForUpload } from '../utils/photoGrouping.js'
 import { apiFetch } from '../api/http.js'
 
 const UPLOAD_CONCURRENCY = 4
@@ -49,6 +50,25 @@ export default function Gallery() {
         ))
     }
 
+    const handleUpdateClientMessage = async (collectionId, clientMessage) => {
+        const response = await apiFetch(`/collections/${collectionId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ clientMessage })
+        })
+        if (!response.ok) {
+            const data = await response.json().catch(() => ({}))
+            throw new Error(data.error || 'Failed to update client message')
+        }
+        const updatedCollection = await response.json()
+        setCollections(current => current.map(collection =>
+            collection.id === collectionId ? updatedCollection : collection
+        ))
+        setSelectedCollection(current =>
+            current && current.id === collectionId ? updatedCollection : current
+        )
+    }
+
     useEffect(() => {
         if (!selectedCollection) {
             setPhotos([])
@@ -66,8 +86,13 @@ export default function Gallery() {
     // `groups` come from groupFilesForUpload (client-side basename grouping): each
     // group is either a new main photo (+ its CR2/XMP attachments) or an
     // attachment-only group matched against an already-loaded existing Photo.
-    const handleAddPhotos = async ({ groups, description, targetStatus = 'PENDING' }, onProgress) => {
-        if (!groups.length) return
+    const handleAddPhotos = async ({ groups: unsortedGroups, description, targetStatus = 'PENDING' }, onProgress) => {
+        if (!unsortedGroups.length) return
+
+        // The backend derives Photos.position from the order of `photos` in each
+        // confirm request, and chunks are sent sequentially: sorting once here keeps
+        // the filename order across the whole upload, chunk boundaries included.
+        const groups = sortGroupsForUpload(unsortedGroups)
 
         // Every raw file across every group is presigned and uploaded in one flat
         // pass; `type` tells the backend which S3 prefix to use (uploads/ vs
@@ -256,6 +281,18 @@ export default function Gallery() {
         setPhotos(current => current.filter(photo => photo.status === 'DELIVERED'))
     }
 
+    const handleDeleteCollection = async (collectionId) => {
+        const response = await apiFetch(`/collections/${collectionId}`, {
+            method: 'DELETE'
+        })
+        if (!response.ok) {
+            const data = await response.json().catch(() => ({}))
+            throw new Error(data.error || 'Failed to delete collection')
+        }
+        setCollections(current => current.filter(collection => collection.id !== collectionId))
+        setSelectedCollection(null)
+    }
+
     const handleRevokeAccess = async (collectionId) => {
         const response = await apiFetch(`/collections/${collectionId}/revoke-access`, {
             method: 'POST'
@@ -301,7 +338,9 @@ export default function Gallery() {
                     onDeleteDeliveredPhoto={handleDeleteDeliveredPhoto}
                     onUpdatePhotoStatus={handleUpdatePhotoStatus}
                     onRevokeAccess={handleRevokeAccess}
+                    onUpdateClientMessage={handleUpdateClientMessage}
                     onMarkReady={handleMarkReady}
+                    onDeleteCollection={handleDeleteCollection}
                 />
             ) : (
                 <CollectionList
