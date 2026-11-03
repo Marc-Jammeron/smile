@@ -2,6 +2,9 @@ import db from "../repository/db.repository.js";
 import s3Repository from "../repository/s3.repository.js";
 import { generateDerivedImages } from "./image-processing.service.js";
 import { isMainPhotoFilename, isBlacklistedFilename } from "./filename.util.js";
+import logger from "../logger.js";
+
+const log = logger.child("photo.service");
 
 // Attachments (RAW/XMP) are opaque past this gate: once accepted, they're never
 // re-classified by format anywhere else in the codebase (see spec's "no re-render"
@@ -12,6 +15,7 @@ const ATTACHMENT_ALLOWED_COLLECTION_STATUSES = ['DRAFT', 'SELECTING', 'EDITING']
 const assertCollectionAcceptsAttachments = async (collectionId) => {
     const collection = await db.Collection.findByPk(collectionId);
     if (!ATTACHMENT_ALLOWED_COLLECTION_STATUSES.includes(collection?.status)) {
+        log.warn("Attachment refused: collection status does not allow it", { collectionId, status: collection?.status ?? null });
         const error = new Error('Attachments can only be uploaded while the collection is in DRAFT, SELECTING or EDITING status');
         error.status = 409;
         throw error;
@@ -53,9 +57,10 @@ export const getAllPhotosByCollectionId = async (collectionId) => {
             },
             order: PHOTO_ORDER,
         });
+        log.debug("Photos loaded", { collectionId, count: photos.length });
         return Promise.all(photos.map(toPhotoDTO));
     } catch (error) {
-        console.error(`Error fetching photos for collection with id ${collectionId}:`, error);
+        log.failure("Error fetching photos", error, { collectionId });
         throw error;
     }
 };
@@ -71,7 +76,7 @@ export const getAllClientPhotosByCollectionId = async (collectionId) => {
         });
         return Promise.all(photos.map(toClientPhotoDTO));
     } catch (error) {
-        console.error(`Error fetching client photos for collection with id ${collectionId}:`, error);
+        log.failure("Error fetching client photos", error, { collectionId });
         throw error;
     }
 };
@@ -81,7 +86,7 @@ export const getPhotoById = async (id) => {
         const photo = await db.Photo.findByPk(id);
         return photo ? toPhotoDTO(photo) : null;
     } catch (error) {
-        console.error(`Error fetching photo with id ${id}:`, error);
+        log.failure("Error fetching photo", error, { photoId: id });
         throw error;
     }
 };
@@ -89,6 +94,7 @@ export const getPhotoById = async (id) => {
 const assertCollectionInEditingStatus = async (collectionId) => {
     const collection = await db.Collection.findByPk(collectionId);
     if (collection?.status !== 'EDITING') {
+        log.warn("DELIVERED upload refused: collection is not in EDITING status", { collectionId, status: collection?.status ?? null });
         const error = new Error("Collection must be in EDITING status to upload DELIVERED photos");
         error.status = 409;
         throw error;
@@ -97,6 +103,7 @@ const assertCollectionInEditingStatus = async (collectionId) => {
 
 export const createPhotosBatch = async ({ collectionId, files, targetStatus = 'PENDING' }) => {
     try {
+        log.debug("Creating upload urls", { collectionId, targetStatus, fileCount: files.length });
         if (targetStatus === 'DELIVERED') {
             await assertCollectionInEditingStatus(collectionId);
         }
@@ -105,6 +112,7 @@ export const createPhotosBatch = async ({ collectionId, files, targetStatus = 'P
         }
         return await Promise.all(files.map(async ({ filename, contentType, type = 'photo' }) => {
             if (isBlacklistedFilename(filename)) {
+                log.warn("Upload refused: blacklisted filename", { collectionId, filename });
                 const error = new Error(`File ${filename} is not a valid upload target`);
                 error.status = 400;
                 throw error;
@@ -112,10 +120,11 @@ export const createPhotosBatch = async ({ collectionId, files, targetStatus = 'P
             const { url, key } = type === 'attachment'
                 ? await s3Repository.getSignedAttachmentUploadUrl(collectionId, filename, contentType)
                 : await s3Repository.getSignedUploadUrl(collectionId, filename, contentType);
+            log.debug("Upload url created", { collectionId, filename, key, type });
             return { filename, url, key };
         }));
     } catch (error) {
-        console.error("Error generating signed upload urls:", error);
+        log.failure("Error generating signed upload urls", error);
         throw error;
     }
 };
@@ -127,6 +136,7 @@ const confirmAttachment = async (attachmentData, photoId) => {
     const { key, contentType, size, filename } = attachmentData;
 
     if (isBlacklistedFilename(filename, size)) {
+        log.warn("Attachment refused: blacklisted filename or size", { photoId, filename, size });
         const error = new Error(`File ${filename} is not a valid attachment`);
         error.status = 400;
         throw error;
@@ -134,6 +144,7 @@ const confirmAttachment = async (attachmentData, photoId) => {
 
     const exists = await s3Repository.objectExists(key);
     if (!exists) {
+        log.warn("Attachment confirmation refused: object missing in storage", { photoId, key });
         const error = new Error(`Object with key ${key} not found in storage`);
         error.status = 400;
         throw error;
@@ -146,12 +157,14 @@ const confirmAttachment = async (attachmentData, photoId) => {
         fileSize: size,
         mimeType: contentType
     });
+    log.info("Attachment saved", { photoId, attachmentId: attachment.id, filename, size });
     return attachment.toJSON();
 };
 
 const confirmAttachmentForExistingPhoto = async (attachmentData, photoId) => {
     const photo = await db.Photo.findByPk(photoId);
     if (!photo) {
+        log.warn("Attachment target photo not found", { photoId });
         const error = new Error(`Photo ${photoId} not found`);
         error.status = 404;
         throw error;
@@ -166,7 +179,10 @@ const confirmPhoto = async (photoData, targetStatus, position) => {
     try {
         const { collectionId, key, contentType, size, description, filename, attachments = [] } = photoData;
 
+        log.debug("Confirming photo", { collectionId, key, filename, size, targetStatus, position, attachmentCount: attachments.length });
+
         if (!isMainPhotoFilename(filename)) {
+            log.warn("Photo refused: unsupported main photo format", { collectionId, filename });
             const error = new Error(`File ${filename} is not a supported main photo format (expected .jpg/.jpeg)`);
             error.status = 400;
             throw error;
@@ -174,6 +190,7 @@ const confirmPhoto = async (photoData, targetStatus, position) => {
 
         const exists = await s3Repository.objectExists(key);
         if (!exists) {
+            log.warn("Photo refused: uploaded object missing in storage", { collectionId, key });
             const error = new Error(`Object with key ${key} not found in storage`);
             error.status = 400;
             throw error;
@@ -185,6 +202,8 @@ const confirmPhoto = async (photoData, targetStatus, position) => {
 
         const { thumbnailKey, previewKey } = await generateDerivedImages(key, { watermark: targetStatus !== 'DELIVERED' });
 
+        log.debug("Derived images generated", { key, thumbnailKey, previewKey, watermarked: targetStatus !== 'DELIVERED' });
+
         const newPhoto = await db.Photo.create({ collectionId, key, thumbnailKey, previewKey, contentType, size, description, originalFilename: filename, status: targetStatus, position });
 
         const attachmentResults = await Promise.allSettled(
@@ -194,10 +213,15 @@ const confirmPhoto = async (photoData, targetStatus, position) => {
             .map((result, index) => result.status === 'rejected' ? { key: attachments[index].key, error: result.reason.message } : null)
             .filter(Boolean);
 
+        if (failedAttachments.length > 0) {
+            log.warn("Photo created but some attachments failed", { photoId: newPhoto.id, failedAttachments });
+        }
+        log.info("Photo created", { photoId: newPhoto.id, collectionId, filename, status: targetStatus, position, attachmentCount: attachments.length - failedAttachments.length });
+
         const photoDTO = await toPhotoDTO(newPhoto);
         return { ...photoDTO, failedAttachments };
     } catch (error) {
-        console.error("Error confirming photo:", error);
+        log.failure("Error confirming photo", error, { key: photoData?.key, collectionId: photoData?.collectionId });
         throw error;
     }
 };
@@ -217,6 +241,7 @@ export const confirmPhotosBatch = async ({ photos = [], attachmentsToExistingPho
     // collection's existing photos; chunks of one upload are confirmed sequentially,
     // so each chunk's base picks up where the previous one ended.
     const basePosition = photos.length > 0 ? await getNextPosition(photos[0].collectionId) : 0;
+    log.debug("Confirming photo batch", { photoCount: photos.length, attachmentsToExistingPhotos: attachmentsToExistingPhotos.length, targetStatus, basePosition });
 
     const photoResults = await Promise.allSettled(photos.map((photoData, index) => confirmPhoto(photoData, targetStatus, basePosition + index)));
 
@@ -244,6 +269,7 @@ export const confirmPhotosBatch = async ({ photos = [], attachmentsToExistingPho
         if (result.status === 'fulfilled') {
             createdAttachments.push(result.value);
         } else {
+            log.failure("Attachment of an existing photo could not be confirmed", result.reason, { photoId: existingAttachmentTasks[index].photoId, key: existingAttachmentTasks[index].attachmentData.key });
             failedAttachments.push({ key: existingAttachmentTasks[index].attachmentData.key, error: result.reason.message });
         }
     });
@@ -254,6 +280,7 @@ export const confirmPhotosBatch = async ({ photos = [], attachmentsToExistingPho
 const assertCollectionInSelectionStatus = async (photo) => {
     const collection = await db.Collection.findByPk(photo.collectionId);
     if (collection?.status !== 'SELECTING') {
+        log.warn("Selection change refused: collection is not in SELECTING status", { photoId: photo.id, collectionId: photo.collectionId, status: collection?.status ?? null });
         const error = new Error('Photo status can only be changed to SELECTED or REJECTED while the collection is in SELECTING status');
         error.status = 400;
         throw error;
@@ -267,6 +294,7 @@ export const updatePhoto = async (id, photoData) => {
         if (status === 'SELECTED' || status === 'REJECTED') {
             const photo = await db.Photo.findByPk(id);
             if (!photo) {
+                log.debug("Photo to update not found", { photoId: id });
                 return false;
             }
             await assertCollectionInSelectionStatus(photo);
@@ -275,9 +303,10 @@ export const updatePhoto = async (id, photoData) => {
         const [updatedRows] = await db.Photo.update({ description, status }, {
             where: { id }
         });
+        log.debug("Photo update done", { photoId: id, updatedRows, status });
         return updatedRows > 0;
     } catch (error) {
-        console.error(`Error updating photo with id ${id}:`, error);
+        log.failure("Error updating photo", error, { photoId: id });
         throw error;
     }
 };
@@ -285,6 +314,7 @@ export const updatePhoto = async (id, photoData) => {
 export const updatePhotoSelectionStatus = async (id, status) => {
     try {
         if (status !== 'SELECTED' && status !== 'REJECTED') {
+            log.warn("Invalid selection status refused", { photoId: id, status });
             const error = new Error("Status must be either 'SELECTED' or 'REJECTED'");
             error.status = 400;
             throw error;
@@ -292,6 +322,7 @@ export const updatePhotoSelectionStatus = async (id, status) => {
 
         const photo = await db.Photo.findByPk(id);
         if (!photo) {
+            log.debug("Photo for selection change not found", { photoId: id });
             return false;
         }
         await assertCollectionInSelectionStatus(photo);
@@ -299,9 +330,10 @@ export const updatePhotoSelectionStatus = async (id, status) => {
         const [updatedRows] = await db.Photo.update({ status }, {
             where: { id }
         });
+        log.debug("Photo selection status updated", { photoId: id, status, previousStatus: photo.status });
         return updatedRows > 0;
     } catch (error) {
-        console.error(`Error updating selection status for photo with id ${id}:`, error);
+        log.failure("Error updating photo selection status", error, { photoId: id });
         throw error;
     }
 };
@@ -313,7 +345,7 @@ export const getSelectedPhotosForCollection = async (collectionId) => {
             order: PHOTO_ORDER
         });
     } catch (error) {
-        console.error(`Error fetching selected photos for collection with id ${collectionId}:`, error);
+        log.failure("Error fetching selected photos", error, { collectionId });
         throw error;
     }
 };
@@ -330,7 +362,7 @@ export const getAttachmentsForPhotos = async (photoIds, options = {}) => {
             ...options
         });
     } catch (error) {
-        console.error(`Error fetching attachments for photos ${photoIds.join(', ')}:`, error);
+        log.failure("Error fetching attachments", error, { photoIds });
         throw error;
     }
 };
@@ -343,7 +375,7 @@ export const getDeliveredPhotosForZip = async (collectionId) => {
             order: PHOTO_ORDER
         });
     } catch (error) {
-        console.error(`Error fetching delivered photos for collection with id ${collectionId}:`, error);
+        log.failure("Error fetching delivered photos", error, { collectionId });
         throw error;
     }
 };
@@ -366,7 +398,7 @@ export const countSelectedPhotos = async (collectionId) => {
             where: { collectionId, status: 'SELECTED' }
         });
     } catch (error) {
-        console.error(`Error counting selected photos for collection with id ${collectionId}:`, error);
+        log.failure("Error counting selected photos", error, { collectionId });
         throw error;
     }
 };
@@ -376,9 +408,10 @@ export const softDeletePhoto = async (id) => {
         const [updatedRows] = await db.Photo.update({ status: 'ARCHIVED' }, {
             where: { id }
         });
+        log.debug("Photo archived", { photoId: id, updatedRows });
         return updatedRows > 0;
     } catch (error) {
-        console.error(`Error soft deleting photo with id ${id}:`, error);
+        log.failure("Error soft deleting photo", error, { photoId: id });
         throw error;
     }
 };
@@ -398,7 +431,7 @@ export const getDeliveredPhotosByCollectionId = async (collectionId) => {
         });
         return Promise.all(photos.map(toPhotoDTO));
     } catch (error) {
-        console.error(`Error fetching delivered photos for collection with id ${collectionId}:`, error);
+        log.failure("Error fetching delivered photos", error, { collectionId });
         throw error;
     }
 };
@@ -411,9 +444,11 @@ export const deleteDeliveredPhoto = async (id) => {
     try {
         const photo = await db.Photo.findByPk(id);
         if (!photo) {
+            log.debug("Delivered photo to delete not found", { photoId: id });
             return null;
         }
         if (photo.status !== 'DELIVERED') {
+            log.warn("Hard delete refused: photo is not DELIVERED", { photoId: id, status: photo.status });
             const error = new Error('Only DELIVERED photos can be deleted through this endpoint');
             error.status = 403;
             throw error;
@@ -426,9 +461,10 @@ export const deleteDeliveredPhoto = async (id) => {
         // DB-level ON DELETE CASCADE (see PhotoAttachments migration) removes the
         // attachment rows; only their S3 objects needed collecting above.
         await db.Photo.destroy({ where: { id } });
+        log.info("Delivered photo and its files deleted", { photoId: id, collectionId: photo.collectionId, deletedObjects: keys.length });
         return true;
     } catch (error) {
-        console.error(`Error deleting delivered photo with id ${id}:`, error);
+        log.failure("Error deleting delivered photo", error, { photoId: id });
         throw error;
     }
 };

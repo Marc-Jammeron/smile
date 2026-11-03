@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { STATUS_OPTIONS, STATUS_LABELS } from 'front-shared/src/constants/collectionStatus.js'
+import { STATUS_OPTIONS, STATUS_LABELS, ALLOWED_STATUS_TRANSITIONS } from 'front-shared/src/constants/collectionStatus.js'
 
 export default function CollectionCard({ collection, onClick, onChangeStatus }) {
     const [updating, setUpdating] = useState(false)
@@ -19,6 +19,8 @@ export default function CollectionCard({ collection, onClick, onChangeStatus }) 
     }
 
     const photoCount = collection.Photos?.length ?? 0
+    const reachableStatuses = ALLOWED_STATUS_TRANSITIONS[collection.status] ?? []
+    const statusChoices = STATUS_OPTIONS.filter(option => option === collection.status || reachableStatuses.includes(option))
 
     return (
         <div className="collection-card" onClick={onClick}>
@@ -29,11 +31,11 @@ export default function CollectionCard({ collection, onClick, onChangeStatus }) 
                 <div className={`collection-card-status status-${collection.status?.toLowerCase()}`}>
                     <select
                         value={collection.status}
-                        disabled={updating}
+                        disabled={updating || reachableStatuses.length === 0}
                         onClick={(event) => event.stopPropagation()}
                         onChange={handleStatusChange}
                     >
-                        {STATUS_OPTIONS.map(option => (
+                        {statusChoices.map(option => (
                             <option key={option} value={option}>{STATUS_LABELS[option]}</option>
                         ))}
                     </select>

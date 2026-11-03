@@ -50,15 +50,15 @@ export default function Gallery() {
         ))
     }
 
-    const handleUpdateClientMessage = async (collectionId, clientMessage) => {
+    const handleUpdateMessage = async (collectionId, field, message) => {
         const response = await apiFetch(`/collections/${collectionId}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ clientMessage })
+            body: JSON.stringify({ [field]: message })
         })
         if (!response.ok) {
             const data = await response.json().catch(() => ({}))
-            throw new Error(data.error || 'Failed to update client message')
+            throw new Error(data.error || 'Failed to update message')
         }
         const updatedCollection = await response.json()
         setCollections(current => current.map(collection =>
@@ -338,7 +338,7 @@ export default function Gallery() {
                     onDeleteDeliveredPhoto={handleDeleteDeliveredPhoto}
                     onUpdatePhotoStatus={handleUpdatePhotoStatus}
                     onRevokeAccess={handleRevokeAccess}
-                    onUpdateClientMessage={handleUpdateClientMessage}
+                    onUpdateMessage={handleUpdateMessage}
                     onMarkReady={handleMarkReady}
                     onDeleteCollection={handleDeleteCollection}
                 />

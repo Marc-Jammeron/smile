@@ -19,6 +19,10 @@ export default (sequelize, DataTypes) => {
             type: DataTypes.TEXT,
             allowNull: true
         },
+        finalMessage: {
+            type: DataTypes.TEXT,
+            allowNull: true
+        },
         status: {
             type: DataTypes.ENUM('DRAFT', 'SELECTING', 'EDITING', 'READY', 'ARCHIVED'),
             defaultValue: 'DRAFT'

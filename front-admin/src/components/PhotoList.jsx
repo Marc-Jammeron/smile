@@ -1,21 +1,20 @@
 import { useState } from 'react'
 import Photo from 'front-shared/src/Photo.jsx'
 import PhotoUploadForm from './PhotoUploadForm.jsx'
+import ClientMessageBox from './ClientMessageBox.jsx'
 import { apiFetch } from '../api/http.js'
 
-const CLIENT_MESSAGE_MAX_LENGTH = 500
 
 const extractZipFilename =(contentDisposition, fallback) => {
     const match = contentDisposition?.match(/filename="?([^";]+)"?/)
     return match ? match[1] : fallback
 }
 
-export default function PhotoList({ collection, photos, loading, onBack, onAddPhotos, onDeletePhoto, onDeleteDeliveredPhoto, onUpdatePhotoStatus, onRevokeAccess, onUpdateClientMessage, onMarkReady, onDeleteCollection }) {
+const MESSAGE_LABEL = (title) =>
+    `${title} (optionnel, markdown : **gras**, *italique*, listes, [liens](https://…)) — n'hésite pas à demander à ChatGPT de mettre ton texte au format md avant de le copier-coller`
+
+export default function PhotoList({ collection, photos, loading, onBack, onAddPhotos, onDeletePhoto, onDeleteDeliveredPhoto, onUpdatePhotoStatus, onRevokeAccess, onUpdateMessage, onMarkReady, onDeleteCollection }) {
     const [showForm, setShowForm] = useState(false)
-    const [clientMessage, setClientMessage] = useState(collection.clientMessage ?? '')
-    const [savingMessage, setSavingMessage] = useState(false)
-    const [messageSaved, setMessageSaved] = useState(false)
-    const [messageError, setMessageError] = useState(null)
     const [showDeliveredForm, setShowDeliveredForm] = useState(false)
     const [copied, setCopied] = useState(false)
     const [revoking, setRevoking] = useState(false)
@@ -30,6 +29,8 @@ export default function PhotoList({ collection, photos, loading, onBack, onAddPh
     const isEditing = collection.status === 'EDITING'
     const isReady = collection.status === 'READY'
     const selectedCount = photos.filter(photo => photo.status === 'SELECTED').length
+    // A collection created straight in EDITING (final photos uploaded directly) never had a client selection.
+    const hasSelection = collection.maxPhotos > 0 || selectedCount > 0
     const deliveredPhotos = photos.filter(photo => photo.status === 'DELIVERED')
     const otherPhotos = photos.filter(photo => photo.status !== 'DELIVERED')
     const clientGalleryUrl = collection.accessToken
@@ -47,11 +48,13 @@ export default function PhotoList({ collection, photos, loading, onBack, onAddPh
     }
 
     const handleMarkReady = async () => {
-        const countMismatchNote = deliveredPhotos.length !== selectedCount
+        const countMismatchNote = hasSelection && deliveredPhotos.length !== selectedCount
             ? ` (${deliveredPhotos.length} photo${deliveredPhotos.length > 1 ? 's' : ''} livrée${deliveredPhotos.length > 1 ? 's' : ''} pour ${selectedCount} sélectionnée${selectedCount > 1 ? 's' : ''} par le client)`
             : ''
         const confirmed = window.confirm(
-            `Cette action est définitive : les photos non retenues (sélection, rejetées) seront supprimées et ne pourront pas être récupérées.${countMismatchNote}\n\nMarquer la collection comme prête ?`
+            hasSelection
+                ? `Cette action est définitive : les photos non retenues (sélection, rejetées) seront supprimées et ne pourront pas être récupérées.${countMismatchNote}\n\nMarquer la collection comme prête ?`
+                : `Le lien client sera activé et le client pourra télécharger les ${deliveredPhotos.length} photo${deliveredPhotos.length > 1 ? 's' : ''} livrée${deliveredPhotos.length > 1 ? 's' : ''}.\n\nMarquer la collection comme prête ?`
         )
         if (!confirmed) return
 
@@ -64,26 +67,6 @@ export default function PhotoList({ collection, photos, loading, onBack, onAddPh
             setMarkReadyError(error.message)
         } finally {
             setMarkingReady(false)
-        }
-    }
-
-    const savedClientMessage = collection.clientMessage ?? ''
-    const clientMessageChanged = clientMessage.trim() !== savedClientMessage
-
-    const handleSaveClientMessage = async () => {
-        setSavingMessage(true)
-        setMessageError(null)
-        setMessageSaved(false)
-        try {
-            await onUpdateClientMessage(collection.id, clientMessage)
-            setClientMessage(clientMessage.trim())
-            setMessageSaved(true)
-            setTimeout(() => setMessageSaved(false), 2000)
-        } catch (error) {
-            console.error('Error saving client message:', error)
-            setMessageError(error.message)
-        } finally {
-            setSavingMessage(false)
         }
     }
 
@@ -169,9 +152,16 @@ export default function PhotoList({ collection, photos, loading, onBack, onAddPh
             <div className="photo-list-header">
                 <button className="back-button" onClick={onBack}>&larr; Retour aux collections</button>
                 <h2>{collection.name}</h2>
-                <span className="selection-counter">
-                    {selectedCount} / {collection.maxPhotos} sélectionnée{selectedCount > 1 ? 's' : ''}
-                </span>
+                {!loading && (
+                    <span className="selection-counter">
+                        {photos.length} photo{photos.length > 1 ? 's' : ''} au total
+                    </span>
+                )}
+                {hasSelection && (
+                    <span className="selection-counter">
+                        {selectedCount} / {collection.maxPhotos} sélectionnée{selectedCount > 1 ? 's' : ''}
+                    </span>
+                )}
                 {!showForm && canAddPhotos && (
                     <button className="button-primary" onClick={() => setShowForm(true)}>
                         + Ajouter des photos
@@ -195,7 +185,7 @@ export default function PhotoList({ collection, photos, loading, onBack, onAddPh
                 >
                     {deleting ? 'Suppression...' : 'Supprimer la galerie'}
                 </button>
-                {collection.status === 'EDITING' && (
+                {collection.status === 'EDITING' && hasSelection && (
                     <button
                         type="button"
                         className="button-primary"
@@ -227,31 +217,24 @@ export default function PhotoList({ collection, photos, loading, onBack, onAddPh
                 </div>
             )}
             {collection.status === 'SELECTING' && canViewAsClient && (
-                <div className="client-message-box">
-                    <label htmlFor="client-message">Message pour le client (optionnel, markdown : **gras**, *italique*, listes, [liens](https://…)) — n'hésite pas à demander à ChatGPT de mettre ton texte au format md avant de le copier-coller</label>
-                    <textarea
-                        id="client-message"
-                        value={clientMessage}
-                        onChange={(event) => setClientMessage(event.target.value)}
-                        maxLength={CLIENT_MESSAGE_MAX_LENGTH}
-                        rows={3}
-                        placeholder="Affiché en haut de la galerie du client pendant la sélection"
-                    />
-                    <div className="client-message-actions">
-                        <span className="client-message-counter">{clientMessage.length}/{CLIENT_MESSAGE_MAX_LENGTH}</span>
-                        {messageError && <span className="form-error">{messageError}</span>}
-                        <button
-                            type="button"
-                            className="button-outline"
-                            onClick={handleSaveClientMessage}
-                            disabled={savingMessage || (!clientMessageChanged && !messageSaved)}
-                        >
-                            {savingMessage ? 'Enregistrement...' : messageSaved ? 'Enregistré !' : 'Enregistrer'}
-                        </button>
-                    </div>
-                </div>
+                <ClientMessageBox
+                    id="client-message"
+                    label={MESSAGE_LABEL('Message pour le client')}
+                    placeholder="Affiché en haut de la galerie du client pendant la sélection"
+                    savedValue={collection.clientMessage}
+                    onSave={(text) => onUpdateMessage(collection.id, 'clientMessage', text)}
+                />
             )}
-            {collection.status === 'SELECTING' && clientGalleryUrl && (
+            {isReady && canViewAsClient && (
+                <ClientMessageBox
+                    id="final-message"
+                    label={MESSAGE_LABEL('Message final pour le client')}
+                    placeholder="Affiché en haut de la galerie du client une fois les photos livrées"
+                    savedValue={collection.finalMessage}
+                    onSave={(text) => onUpdateMessage(collection.id, 'finalMessage', text)}
+                />
+            )}
+            {(collection.status === 'SELECTING' || isReady) && clientGalleryUrl && (
                 <div className={`access-link-box${collection.accessTokenRevokedAt ? ' access-link-revoked' : ''}`}>
                     {collection.accessTokenRevokedAt ? (
                         <span>Accès client révoqué</span>
@@ -277,7 +260,9 @@ export default function PhotoList({ collection, photos, loading, onBack, onAddPh
                         <h3>{isEditing ? 'Livraison finale' : 'Photos livrées'}</h3>
                         {isEditing && (
                             <span className="selection-counter">
-                                {deliveredPhotos.length} uploadée{deliveredPhotos.length > 1 ? 's' : ''} / {selectedCount} sélectionnée{selectedCount > 1 ? 's' : ''}
+                                {hasSelection
+                                    ? `${deliveredPhotos.length} uploadée${deliveredPhotos.length > 1 ? 's' : ''} / ${selectedCount} sélectionnée${selectedCount > 1 ? 's' : ''}`
+                                    : `${deliveredPhotos.length} uploadée${deliveredPhotos.length > 1 ? 's' : ''}`}
                             </span>
                         )}
                         {isEditing && !showDeliveredForm && (
@@ -324,7 +309,7 @@ export default function PhotoList({ collection, photos, loading, onBack, onAddPh
             {loading ? (
                 <p className="status-message">Chargement des photos...</p>
             ) : otherPhotos.length === 0 ? (
-                !isReady && <p className="status-message">Aucune photo dans cette collection</p>
+                !isReady && !(isEditing && !hasSelection) && <p className="status-message">Aucune photo dans cette collection</p>
             ) : (
                 <div className="photo-grid">
                     {otherPhotos.map(photo => (

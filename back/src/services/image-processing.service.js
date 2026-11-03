@@ -3,6 +3,9 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import s3Repository from "../repository/s3.repository.js";
 import { validateWatermarkValues, loadSavedWatermarkValues, buildWatermarkConfig } from "./settings.service.js";
+import logger from "../logger.js";
+
+const log = logger.child("image-processing");
 
 const THUMBNAIL_WIDTH = 400;
 const THUMBNAIL_JPEG_QUALITY = 80;
@@ -50,11 +53,13 @@ const applyOpacity = async (input, opacity) => {
 };
 
 export const buildPreview = async (imageBuffer, { watermark = false } = {}) => {
+    const startedAt = performance.now();
     const { data: resizedBuffer, info } = await sharp(imageBuffer)
         .resize({ width: PREVIEW_WIDTH, withoutEnlargement: true })
         .toBuffer({ resolveWithObject: true });
 
     if (!watermark) {
+        log.debug("Building preview without watermark", { width: info.width, height: info.height });
         return sharp(resizedBuffer)
             .jpeg({ quality: PREVIEW_JPEG_QUALITY })
             .toBuffer();
@@ -70,6 +75,7 @@ export const buildPreview = async (imageBuffer, { watermark = false } = {}) => {
     let { width: watermarkWidth, height: watermarkHeight } = await sharp(watermarkBuffer).metadata();
 
     if (watermarkWidth > info.width || watermarkHeight > info.height) {
+        log.debug("Watermark larger than the photo, shrinking it", { watermarkWidth, watermarkHeight, photoWidth: info.width, photoHeight: info.height });
         const shrunk = await sharp(watermarkBuffer)
             .resize({ width: info.width, height: info.height, fit: "inside" })
             .toBuffer({ resolveWithObject: true });
@@ -82,16 +88,24 @@ export const buildPreview = async (imageBuffer, { watermark = false } = {}) => {
         watermark.position, info.width, info.height, watermarkWidth, watermarkHeight, watermark.margin
     );
 
-    return sharp(resizedBuffer)
+    const preview = await sharp(resizedBuffer)
         .composite([{ input: watermarkBuffer, left, top }])
         .jpeg({ quality: PREVIEW_JPEG_QUALITY })
         .toBuffer();
+    log.debug("Preview built with watermark", {
+        width: info.width, height: info.height, position: watermark.position, left, top, bytes: preview.length,
+        durationMs: Math.round(performance.now() - startedAt)
+    });
+    return preview;
 };
 
 let testPhotoBuffer = null;
 
 const loadTestPhoto = async () => {
-    testPhotoBuffer ??= await readFile(WATERMARK_TEST_PHOTO_PATH);
+    if (!testPhotoBuffer) {
+        log.debug("Loading the watermark test photo", { path: WATERMARK_TEST_PHOTO_PATH });
+        testPhotoBuffer = await readFile(WATERMARK_TEST_PHOTO_PATH);
+    }
     return testPhotoBuffer;
 };
 
@@ -109,6 +123,8 @@ export const generateWatermarkSample = async (values) => {
 };
 
 export const generateDerivedImages = async (key, { watermark = true } = {}) => {
+    const startedAt = performance.now();
+    log.debug("Generating derived images", { key, watermark });
     const original = await s3Repository.getObject(key);
     const watermarkConfig = watermark ? await buildWatermarkConfig(await loadSavedWatermarkValues()) : false;
 
@@ -123,5 +139,10 @@ export const generateDerivedImages = async (key, { watermark = true } = {}) => {
         s3Repository.putObject(previewKey, previewBuffer, "image/jpeg")
     ]);
 
+    log.info("Derived images generated", {
+        key, thumbnailKey, previewKey, watermark,
+        originalBytes: original.length, previewBytes: previewBuffer.length, thumbnailBytes: thumbnailBuffer.length,
+        durationMs: Math.round(performance.now() - startedAt)
+    });
     return { thumbnailKey, previewKey };
 };

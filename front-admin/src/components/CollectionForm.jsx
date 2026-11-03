@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { STATUS_OPTIONS, STATUS_LABELS } from 'front-shared/src/constants/collectionStatus.js'
+import { CREATABLE_STATUS_OPTIONS, STATUS_LABELS } from 'front-shared/src/constants/collectionStatus.js'
 
 export default function CollectionForm({ onCreate, onCancel }) {
     const [name, setName] = useState('')
@@ -50,7 +50,7 @@ export default function CollectionForm({ onCreate, onCancel }) {
                 <label>
                     Statut
                     <select value={status} onChange={(event) => setStatus(event.target.value)}>
-                        {STATUS_OPTIONS.map(option => (
+                        {CREATABLE_STATUS_OPTIONS.map(option => (
                             <option key={option} value={option}>{STATUS_LABELS[option]}</option>
                         ))}
                     </select>

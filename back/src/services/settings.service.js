@@ -19,6 +19,9 @@ import {
     getOriginalWatermarkValues
 } from './settings.constants.js';
 import { renderWatermarkText } from './watermark-text.service.js';
+import logger from '../logger.js';
+
+const log = logger.child('settings.service');
 
 
 const SETTINGS_ID = 1;
@@ -226,12 +229,21 @@ export const buildWatermarkConfig = async (values) => {
     const original = getOriginalWatermarkValues();
     let image = original.assetPath;
     let size = values.watermarkSize ?? null;
+    let source = 'default-asset';
     if (values.watermarkText) {
         image = await renderWatermarkText(values.watermarkText);
         size ??= WATERMARK_TEXT_DEFAULT_SIZE;
+        source = 'text';
     } else if (values.watermarkKey) {
         image = await s3Repository.getObject(values.watermarkKey);
+        source = 'custom-image';
     }
+    log.debug('Watermark config built', {
+        source,
+        position: values.watermarkPosition ?? original.position,
+        opacity: values.watermarkOpacity ?? Math.round(original.opacity * 100),
+        size
+    });
 
     return {
         image,
@@ -284,7 +296,7 @@ const deleteObjectQuietly = async (key) => {
     try {
         await s3Repository.deleteObject(key);
     } catch (error) {
-        console.error(`Could not delete S3 object ${key}:`, error);
+        log.error('Could not delete S3 object (orphaned file, safe to remove manually)', error, { key });
     }
 };
 
@@ -295,12 +307,15 @@ const writeSettings = async (values) => {
     if (row) {
         await row.update(values);
     } else {
+        log.info('Creating the gallery settings row', { fields: Object.keys(values) });
         await db.GallerySettings.create({ id: SETTINGS_ID, ...values });
     }
+    log.debug('Settings saved', { fields: Object.keys(values) });
 
     for (const field of ASSET_KEY_FIELDS) {
         const previousKey = previousKeys[field];
         if (field in values && previousKey && previousKey !== values[field]) {
+            log.info('Replacing a branding asset, deleting the previous file', { field, previousKey });
             await deleteObjectQuietly(previousKey);
         }
     }
@@ -311,6 +326,7 @@ const writeSettings = async (values) => {
 export const updateSettings = async (partial) => {
     const values = await validateSettingsValues(partial);
     if (Object.keys(values).length === 0) {
+        log.debug('Settings update contains nothing to change');
         return getSettings();
     }
     return writeSettings(values);
@@ -319,8 +335,10 @@ export const updateSettings = async (partial) => {
 export const resetWatermark = async () => {
     const row = await findRow();
     if (!row) {
+        log.debug('Watermark reset skipped: no settings row yet');
         return getSettings();
     }
+    log.info('Resetting watermark to the original values');
     return writeSettings({
         watermarkKey: null,
         watermarkText: null,
@@ -333,14 +351,17 @@ export const resetWatermark = async () => {
 export const resetLogo = async () => {
     const row = await findRow();
     if (!row) {
+        log.debug('Logo reset skipped: no settings row yet');
         return getSettings();
     }
+    log.info('Removing the logo');
     return writeSettings({ logoKey: null });
 };
 
 const getAssetKind = (kind) => {
     const config = Object.hasOwn(ASSET_KINDS, kind) ? ASSET_KINDS[kind] : null;
     if (!config) {
+        log.warn('Unknown branding asset kind requested', { kind });
         throw badRequest('Type de fichier inconnu');
     }
     return config;
@@ -351,6 +372,7 @@ export const getUploadUrl = async (kind, contentType) => {
     if (!config.contentTypes.includes(contentType)) {
         throw badRequest(config.formatError);
     }
+    log.debug('Creating a branding upload url', { kind, contentType });
     return s3Repository.getSignedBrandingUploadUrl(kind, contentType);
 };
 
@@ -359,9 +381,11 @@ export const confirmUpload = async (kind, key) => {
 
     const rawKeyRegex = new RegExp(`^branding/${kind}/raw/${UUID_PATTERN}$`);
     if (typeof key !== 'string' || !rawKeyRegex.test(key)) {
+        log.warn('Branding upload refused: invalid key', { kind });
         throw badRequest('Fichier invalide');
     }
 
+    log.debug('Confirming branding upload', { kind, key });
     try {
         const head = await s3Repository.headObject(key);
         if (!head) {
@@ -372,11 +396,13 @@ export const confirmUpload = async (kind, key) => {
         }
 
         const raw = await s3Repository.getObject(key);
+        log.debug('Validating uploaded image', { kind, key, bytes: raw.length });
 
         let metadata;
         try {
             metadata = await sharp(raw).metadata();
-        } catch {
+        } catch (cause) {
+            log.warn('Uploaded branding file is not a readable image', { kind, key, reason: cause.message });
             throw badRequest('Fichier illisible');
         }
         const extension = Object.hasOwn(config.formats, metadata.format) ? config.formats[metadata.format] : null;
@@ -392,16 +418,19 @@ export const confirmUpload = async (kind, key) => {
             reencoded = await sharp(raw, { limitInputPixels: MAX_BRANDING_DIMENSION * MAX_BRANDING_DIMENSION })
                 .toFormat(metadata.format)
                 .toBuffer();
-        } catch {
+        } catch (cause) {
+            log.warn('Uploaded branding image could not be re-encoded', { kind, key, reason: cause.message });
             throw badRequest('Fichier illisible');
         }
 
         const finalKey = `branding/${kind}/${randomUUID()}.${extension}`;
         await s3Repository.putObject(finalKey, reencoded, `image/${metadata.format}`);
         await s3Repository.deleteObject(key);
+        log.info('Branding asset uploaded', { kind, key: finalKey, format: metadata.format, width: metadata.width, height: metadata.height, bytes: reencoded.length });
         return { key: finalKey };
     } catch (error) {
         if (error.status) {
+            log.debug('Removing the rejected raw upload', { kind, key, reason: error.message });
             await deleteObjectQuietly(key);
         }
         throw error;
