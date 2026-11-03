@@ -6,8 +6,14 @@ import CollectionModel from "../model/collection.model.js";
 import PhotoModel from "../model/photos.model.js";
 import PhotoAttachmentModel from "../model/photo-attachment.model.js";
 import GallerySettingsModel from "../model/gallery-settings.model.js";
+import logger from "../logger.js";
+
+const log = logger.child("db");
+const sqlLog = log.child("sql");
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+const maskSqlLiterals = (sql) => sql.replace(/'(?:[^']|'')*'/g, "'?'");
 
 const sequelize = new Sequelize(
     process.env.DB_NAME,
@@ -17,18 +23,31 @@ const sequelize = new Sequelize(
         host: process.env.DB_HOST,
         port: process.env.DB_PORT,
         dialect: "postgres",
-        logging: false
+        // Les requêtes SQL ne sont tracées qu'en debug, et sans leurs valeurs littérales :
+        // un WHERE "accessToken" = '...' ferait fuiter le jeton d'accès client.
+        logging: sqlLog.isLevelEnabled("debug")
+            ? (sql, durationMs) => sqlLog.debug(maskSqlLiterals(sql), { durationMs })
+            : false,
+        benchmark: true
     }
 );
 
+log.info("Connecting to database", {
+    host: process.env.DB_HOST,
+    port: process.env.DB_PORT,
+    database: process.env.DB_NAME,
+    user: process.env.DB_USER
+});
+
 try {
     await sequelize.authenticate();
-    console.log("Connection has been established successfully.");
+    log.info("Database connection established");
 } catch (error) {
-    console.error("Unable to connect to the database:", error);
-    console.error("kill the process");
+    log.error("Unable to connect to the database, exiting", error, { host: process.env.DB_HOST, port: process.env.DB_PORT });
     process.exit(1);
 }
+
+const migrationLog = log.child("migrations");
 
 const umzug = new Umzug({
     migrations: {
@@ -41,14 +60,20 @@ const umzug = new Umzug({
     },
     context: sequelize.getQueryInterface(),
     storage: new SequelizeStorage({ sequelize }),
-    logger: console
+    // Umzug passe des objets { event, name, ... } : on garde l'événement comme message.
+    logger: Object.fromEntries(["debug", "info", "warn", "error"].map(level => [
+        level,
+        ({ event, ...details }) => migrationLog[level](`Migration ${event ?? level}`, details)
+    ]))
 });
 
 try {
-    await umzug.up();
-    console.log("Database migrations applied successfully.");
+    const pending = await umzug.pending();
+    log.info("Applying database migrations", { pending: pending.length });
+    const applied = await umzug.up();
+    log.info("Database migrations applied", { applied: applied.map(({ name }) => name) });
 } catch (error) {
-    console.error("Failed to apply database migrations:", error);
+    log.error("Failed to apply database migrations, exiting", error);
     process.exit(1);
 }
 

@@ -4,6 +4,9 @@ import { Op } from "sequelize";
 import db from "../repository/db.repository.js";
 import s3Repository from "../repository/s3.repository.js";
 import { getSelectedPhotosForCollection, getDeliveredPhotosForZip, getPhotoDownloadFilename, getAttachmentsForPhotos } from "./photo.service.js";
+import logger from "../logger.js";
+
+const log = logger.child("collection.service");
 
 export const getAllCollections = async () => {
     try {
@@ -13,7 +16,7 @@ export const getAllCollections = async () => {
         });
         return collections;
     } catch (error) {
-        console.error("Error fetching collections:", error);
+        log.failure("Error fetching collections", error);
         throw error;
     }
 };
@@ -26,17 +29,18 @@ export const getCollectionById = async (id) => {
         });
         return collection;
     } catch (error) {
-        console.error(`Error fetching collection with id ${id}:`, error);
+        log.failure("Error fetching collection", error, { collectionId: id });
         throw error;
     }
 };
 
 export const createCollection = async (collectionData) => {
     try {
+        log.debug("Creating collection", { fields: Object.keys(collectionData ?? {}) });
         const newCollection = await db.Collection.create(collectionData);
         return newCollection;
     } catch (error) {
-        console.error("Error creating collection:", error);
+        log.failure("Error creating collection", error);
         throw error;
     }
 };
@@ -50,6 +54,7 @@ export const updateCollection = async (id, collectionData) => {
                 ? collectionData.clientMessage.trim() || null
                 : null;
             if (clientMessage && clientMessage.length > CLIENT_MESSAGE_MAX_LENGTH) {
+                log.debug("Client message too long", { collectionId: id, length: clientMessage.length, max: CLIENT_MESSAGE_MAX_LENGTH });
                 const error = new Error(`Le message client ne peut pas dépasser ${CLIENT_MESSAGE_MAX_LENGTH} caractères.`);
                 error.status = 400;
                 throw error;
@@ -61,6 +66,7 @@ export const updateCollection = async (id, collectionData) => {
             const collection = await db.Collection.findByPk(id);
             if (collection && !collection.accessToken) {
                 collectionData = { ...collectionData, accessToken: crypto.randomBytes(32).toString('base64url') };
+                log.info("Access token generated for collection entering SELECTING", { collectionId: id });
             }
         }
 
@@ -68,11 +74,15 @@ export const updateCollection = async (id, collectionData) => {
             where: { id }
         });
         if (updatedRows === 0) {
+            log.debug("No collection row updated", { collectionId: id });
             return null;
+        }
+        if (collectionData.status) {
+            log.info("Collection status changed", { collectionId: id, status: collectionData.status });
         }
         return await db.Collection.findByPk(id);
     } catch (error) {
-        console.error(`Error updating collection with id ${id}:`, error);
+        log.failure("Error updating collection", error, { collectionId: id });
         throw error;
     }
 };
@@ -88,9 +98,11 @@ export const deleteCollection = async (id) => {
     try {
         const collection = await db.Collection.findByPk(id);
         if (!collection) {
+            log.debug("Collection to delete not found", { collectionId: id });
             return false;
         }
 
+        log.info("Deleting collection and all its files", { collectionId: id, name: collection.name });
         const photos = await db.Photo.findAll({ where: { collectionId: id } });
         const attachments = await getAttachmentsForPhotos(photos.map((photo) => photo.id));
         const keys = [
@@ -98,6 +110,7 @@ export const deleteCollection = async (id) => {
             ...attachments.map((attachment) => attachment.s3Key)
         ].filter(Boolean);
 
+        log.debug("Deleting collection files from storage", { collectionId: id, photoCount: photos.length, attachmentCount: attachments.length, objectCount: keys.length });
         for (const key of keys) {
             await s3Repository.deleteObject(key);
         }
@@ -106,9 +119,10 @@ export const deleteCollection = async (id) => {
         await s3Repository.deleteByPrefix(`attachments/${id}/`);
 
         await db.Collection.destroy({ where: { id } });
+        log.info("Collection deleted", { collectionId: id, deletedObjects: keys.length });
         return true;
     } catch (error) {
-        console.error(`Error deleting collection with id ${id}:`, error);
+        log.failure("Error deleting collection (storage may be partially cleaned, retry is safe)", error, { collectionId: id });
         throw error;
     }
 };
@@ -118,9 +132,10 @@ export const revokeCollectionAccess = async (id) => {
         const [updatedRows] = await db.Collection.update({ accessTokenRevokedAt: new Date() }, {
             where: { id }
         });
+        log.debug("Revoke access done", { collectionId: id, updatedRows });
         return updatedRows > 0;
     } catch (error) {
-        console.error(`Error revoking access for collection with id ${id}:`, error);
+        log.failure("Error revoking collection access", error, { collectionId: id });
         throw error;
     }
 };
@@ -153,6 +168,7 @@ export const streamSelectionHdZip = async (collectionId, res) => {
         throw error;
     }
     if (collection.status !== 'EDITING') {
+        log.debug("HD ZIP refused: wrong collection status", { collectionId, status: collection.status });
         const error = new Error('La collection doit être en phase Retouche pour télécharger la sélection HD.');
         error.status = 409;
         throw error;
@@ -187,9 +203,14 @@ export const streamSelectionHdZip = async (collectionId, res) => {
     let archiveError = null;
     archive.on('error', (err) => {
         archiveError = err;
+        log.error("Archiver error while building the selection HD ZIP", err, { collectionId });
         archive.abort();
     });
+    archive.on('warning', (err) => {
+        log.warn("Archiver warning while building the selection HD ZIP", err, { collectionId });
+    });
     archive.pipe(res);
+    log.debug("Streaming selection HD ZIP", { collectionId, zipFilename, photoCount: photos.length, attachmentCount: attachments.length });
 
     // Failures are collected instead of just logged: a missing CR2 makes a photo
     // unretouchable, so it must be visible in the delivered ZIP, not just in server
@@ -200,11 +221,12 @@ export const streamSelectionHdZip = async (collectionId, res) => {
         try {
             const stream = await s3Repository.getObjectStream(s3Key);
             stream.on('error', (err) => {
-                console.error(`Error streaming ${describeFailure} from collection ${collectionId}:`, err.message);
+                log.error(`Error streaming ${describeFailure}`, err, { collectionId, s3Key });
             });
             archive.append(stream, { name: entryName });
+            log.debug("Added file to selection HD ZIP", { collectionId, entryName });
         } catch (err) {
-            console.error(`Error fetching ${describeFailure} from collection ${collectionId} from storage:`, err.message);
+            log.error(`Error fetching ${describeFailure} from storage`, err, { collectionId, s3Key });
             failures.push(`${entryName}: ${err.message}`);
         }
     };
@@ -221,14 +243,16 @@ export const streamSelectionHdZip = async (collectionId, res) => {
     }
 
     if (failures.length > 0) {
+        log.warn("Selection HD ZIP is missing files, adding _erreurs.txt", { collectionId, failureCount: failures.length });
         archive.append(Buffer.from(failures.join('\n'), 'utf-8'), { name: '_erreurs.txt' });
     }
 
     await archive.finalize();
+    log.debug("Selection HD ZIP finalized", { collectionId, bytes: archive.pointer(), failureCount: failures.length });
 
     if (archiveError) {
         if (res.headersSent) {
-            console.error(`Error generating selection HD zip for collection ${collectionId} (streaming already started):`, archiveError.message);
+            log.error("Selection HD ZIP broken (streaming already started)", archiveError, { collectionId });
             return;
         }
         const error = new Error('Erreur lors de la génération du ZIP');
@@ -244,6 +268,7 @@ export const streamSelectionHdZip = async (collectionId, res) => {
 // cleaned up afterwards since storage has no transactional guarantee with the DB and
 // the READY transition should not be blocked by a slow/failing bucket.
 export const markCollectionAsReady = async (id) => {
+    log.debug("Marking collection as ready", { collectionId: id });
     const collection = await db.Collection.findByPk(id);
     if (!collection) {
         const error = new Error('Collection introuvable');
@@ -263,6 +288,7 @@ export const markCollectionAsReady = async (id) => {
         throw error;
     }
 
+    log.info("Delivering collection: discarding non-delivered photos", { collectionId: id, deliveredCount });
     let photosToDelete = [];
     let attachmentsToDelete = [];
     await db.sequelize.transaction(async (transaction) => {
@@ -284,17 +310,22 @@ export const markCollectionAsReady = async (id) => {
         await db.Collection.update({ status: 'READY' }, { where: { id }, transaction });
     });
 
+    log.info("Collection flagged READY in database", { collectionId: id, discardedPhotos: photosToDelete.length, discardedAttachments: attachmentsToDelete.length });
+
     const keys = [
         ...photosToDelete.flatMap((photo) => [photo.key, photo.thumbnailKey, photo.previewKey].filter(Boolean)),
         ...attachmentsToDelete.map((attachment) => attachment.s3Key)
     ];
+    let failedDeletions = 0;
     for (const key of keys) {
         try {
             await s3Repository.deleteObject(key);
         } catch (error) {
-            console.error(`Error deleting S3 object with key ${key} after marking collection ${id} as ready:`, error.message);
+            failedDeletions += 1;
+            log.error("Could not delete S3 object after marking collection as ready (orphaned file)", error, { collectionId: id, key });
         }
     }
+    log.info("Storage cleanup after delivery done", { collectionId: id, objectCount: keys.length, failedDeletions });
 
     return await db.Collection.findByPk(id);
 };
@@ -311,6 +342,7 @@ export const streamDeliveredZip = async (collection, res) => {
     }
 
     const photos = await getDeliveredPhotosForZip(collection.id);
+    log.debug("Streaming delivered ZIP", { collectionId: collection.id, photoCount: photos.length });
 
     const date = new Date().toISOString().slice(0, 10).replace(/-/g, '');
     const zipFilename = `${slugifyCollectionName(collection.name)}-${date}.zip`;
@@ -322,27 +354,34 @@ export const streamDeliveredZip = async (collection, res) => {
     let archiveError = null;
     archive.on('error', (err) => {
         archiveError = err;
+        log.error("Archiver error while building the delivered ZIP", err, { collectionId: collection.id });
         archive.abort();
+    });
+    archive.on('warning', (err) => {
+        log.warn("Archiver warning while building the delivered ZIP", err, { collectionId: collection.id });
     });
     archive.pipe(res);
 
+    let skippedFiles = 0;
     for (const photo of photos) {
         try {
             const stream = await s3Repository.getObjectStream(photo.key);
             stream.on('error', (err) => {
-                console.error(`Error streaming delivered file for photo ${photo.id} of collection ${collection.id}:`, err.message);
+                log.error("Error streaming delivered file", err, { photoId: photo.id, collectionId: collection.id });
             });
             archive.append(stream, { name: getPhotoDownloadFilename(photo) });
         } catch (err) {
-            console.error(`Error fetching delivered file for photo ${photo.id} of collection ${collection.id} from storage:`, err.message);
+            skippedFiles += 1;
+            log.error("Error fetching delivered file from storage, it will be missing from the ZIP", err, { photoId: photo.id, collectionId: collection.id });
         }
     }
 
     await archive.finalize();
+    log.debug("Delivered ZIP finalized", { collectionId: collection.id, bytes: archive.pointer(), skippedFiles });
 
     if (archiveError) {
         if (res.headersSent) {
-            console.error(`Error generating delivered zip for collection ${collection.id} (streaming already started):`, archiveError.message);
+            log.error("Delivered ZIP broken (streaming already started)", archiveError, { collectionId: collection.id });
             return;
         }
         const error = new Error('Erreur lors de la génération du ZIP');
@@ -356,8 +395,9 @@ export const markCollectionAsViewed = async (id) => {
         await db.Collection.update({ viewedByCustomer: true }, {
             where: { id, viewedByCustomer: false }
         });
+        log.debug("Collection marked as viewed", { collectionId: id });
     } catch (error) {
-        console.error(`Error marking collection with id ${id} as viewed:`, error);
+        log.failure("Error marking collection as viewed", error, { collectionId: id });
         throw error;
     }
 };

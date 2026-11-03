@@ -8,6 +8,10 @@ import { settingsRouter } from './src/router/settings.router.js';
 import { clientRouter } from './src/router/client.router.js';
 import { requireAuth, verifyOrigin } from './src/middleware/auth.middleware.js';
 import { createAdminCors, createClientCors } from './src/config/cors.js';
+import { requestLogger } from './src/middleware/request-logger.middleware.js';
+import logger from './src/logger.js';
+
+const log = logger.child('app');
 
 const app = express();
 
@@ -16,6 +20,17 @@ app.set('trust proxy', 1); // 1 hop : le conteneur est derrière Envoy (edge Sca
 const adminCors = createAdminCors();
 const clientCors = createClientCors();
 
+if (!process.env.SESSION_SECRET) {
+    log.error('SESSION_SECRET is not set: sessions cannot be signed securely');
+}
+if (!process.env.ADMIN_ORIGIN) {
+    log.warn('ADMIN_ORIGIN is not set: admin CORS and origin checks will reject browser requests');
+}
+if (!process.env.CLIENT_ORIGIN) {
+    log.warn('CLIENT_ORIGIN is not set: client CORS will reject browser requests');
+}
+
+app.use(requestLogger); // premier : tout ce qui suit (CORS, auth, contrôleurs) logge avec le requestId
 app.use(express.json({ inflate: false })); // refuse les corps compressés (Node2Shell, CVE-2026-111497)
 app.use(session({
     secret: process.env.SESSION_SECRET,
@@ -41,7 +56,7 @@ app.get('/', (req, res) => {
 });
 
 app.use((err, req, res, next) => {
-    console.error(err.stack);
+    log.failure('Unhandled error in request pipeline', err, { method: req.method });
     res.status(500).send('Something broke!');
 });
 

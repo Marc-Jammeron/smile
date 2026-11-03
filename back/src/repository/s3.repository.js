@@ -2,6 +2,9 @@ import { S3Client, PutObjectCommand, GetObjectCommand, HeadObjectCommand, Delete
 import { Buffer } from "node:buffer";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { v4 as uuid } from "uuid";
+import logger from "../logger.js";
+
+const log = logger.child("s3");
 
 const s3 = new S3Client({
     endpoint: process.env.S3_ENDPOINT,       // undefined en prod = AWS SDK utilise l'endpoint AWS par défaut
@@ -15,6 +18,19 @@ const s3 = new S3Client({
 
 const BUCKET = process.env.S3_BUCKET;
 
+log.info("S3 client configured", {
+    endpoint: process.env.S3_ENDPOINT || "(aws default)",
+    region: process.env.S3_REGION || "us-east-1",
+    bucket: BUCKET,
+    forcePathStyle: process.env.S3_FORCE_PATH_STYLE === "true"
+});
+if (!BUCKET) {
+    log.error("S3_BUCKET is not set: every storage operation will fail");
+}
+if (!process.env.S3_ACCESS_KEY || !process.env.S3_SECRET_KEY) {
+    log.warn("S3 credentials are incomplete (S3_ACCESS_KEY / S3_SECRET_KEY)");
+}
+
 const getSignedPutUrl = (key, contentType) => {
     const command = new PutObjectCommand({
         Bucket: BUCKET,
@@ -22,6 +38,7 @@ const getSignedPutUrl = (key, contentType) => {
         ContentType: contentType,
     });
 
+    log.debug("Signing upload url", { key, contentType });
     return getSignedUrl(s3, command, { expiresIn: 300 });
 };
 
@@ -51,6 +68,7 @@ const getSignedDownloadUrl = async (key) => {
         Key: key,
     });
 
+    log.debug("Signing download url", { key });
     const url = await getSignedUrl(s3, command, { expiresIn: 300 });
     return url;
 };
@@ -66,7 +84,9 @@ const getObject = async (key) => {
     for await (const chunk of Body) {
         chunks.push(chunk);
     }
-    return Buffer.concat(chunks);
+    const buffer = Buffer.concat(chunks);
+    log.debug("Object downloaded", { key, bytes: buffer.length });
+    return buffer;
 };
 
 const getObjectStream = async (key) => {
@@ -76,6 +96,7 @@ const getObjectStream = async (key) => {
     });
 
     const { Body } = await s3.send(command);
+    log.debug("Object stream opened", { key });
     return Body;
 };
 
@@ -88,6 +109,7 @@ const putObject = async (key, body, contentType) => {
     });
 
     await s3.send(command);
+    log.debug("Object stored", { key, contentType, bytes: Buffer.isBuffer(body) ? body.length : undefined });
     return key;
 };
 
@@ -99,11 +121,14 @@ const objectExists = async (key) => {
 
     try {
         await s3.send(command);
+        log.debug("Object exists", { key });
         return true;
     } catch (error) {
         if (error.name === 'NotFound' || error.$metadata?.httpStatusCode === 404) {
+            log.debug("Object not found", { key });
             return false;
         }
+        log.error("Could not check object existence", error, { key });
         throw error;
     }
 };
@@ -116,11 +141,14 @@ const headObject = async (key) => {
 
     try {
         const { ContentLength, ContentType } = await s3.send(command);
+        log.debug("Object head", { key, size: ContentLength, contentType: ContentType });
         return { size: ContentLength, contentType: ContentType };
     } catch (error) {
         if (error.name === 'NotFound' || error.$metadata?.httpStatusCode === 404) {
+            log.debug("Object not found", { key });
             return null;
         }
+        log.error("Could not read object metadata", error, { key });
         throw error;
     }
 };
@@ -133,15 +161,17 @@ const deleteObject = async (key) => {
 
     try {
         await s3.send(command);
+        log.debug("Object deleted", { key });
         return true;
     } catch (error) {
-        console.error(`Error deleting object with key ${key}:`, error);
+        log.error("Could not delete object", error, { key });
         throw error;
     }
 };
 
 const deleteByPrefix = async (prefix) => {
     if (!prefix) {
+        log.error("deleteByPrefix called with an empty prefix, refusing");
         throw new Error('deleteByPrefix requires a non-empty prefix');
     }
 
@@ -160,6 +190,7 @@ const deleteByPrefix = async (prefix) => {
                 Delete: { Objects: Contents.map(({ Key }) => ({ Key })), Quiet: true },
             }));
             if (Errors.length > 0) {
+                log.error("Bulk delete partially failed", { prefix, failed: Errors.length, firstError: Errors[0].Message });
                 throw new Error(`Failed to delete ${Errors.length} object(s) under prefix ${prefix}: ${Errors[0].Message}`);
             }
             deleted += Contents.length;
@@ -168,6 +199,7 @@ const deleteByPrefix = async (prefix) => {
         continuationToken = IsTruncated ? NextContinuationToken : undefined;
     } while (continuationToken);
 
+    log.debug("Objects deleted by prefix", { prefix, deleted });
     return deleted;
 };
 

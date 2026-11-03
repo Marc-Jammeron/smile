@@ -1,5 +1,8 @@
 import sharp from 'sharp';
 import { fileURLToPath } from 'node:url';
+import logger from '../logger.js';
+
+const log = logger.child('watermark-text');
 
 // Police embarquée : l'image Docker (Alpine) n'a aucune police système.
 const FONT_FILE = fileURLToPath(new URL('../../assets/fonts/DejaVuSans-Bold.ttf', import.meta.url));
@@ -15,6 +18,7 @@ const escapeMarkup = (text) =>
 // Texte blanc avec une ombre sombre, lisible sur fond clair comme sombre. Rendu à une
 // taille arbitraire : buildPreview le redimensionne ensuite comme n'importe quelle image.
 export const renderWatermarkText = async (text) => {
+    log.debug('Rendering watermark text', { length: text.length, lines: text.split('\n').length });
     const markup = `<span foreground="white" letter_spacing="${LETTER_SPACING}">${escapeMarkup(text)}</span>`;
     const glyphs = await sharp({
         text: { text: markup, rgba: true, align: 'center', font: FONT, fontfile: FONT_FILE, dpi: 72, spacing: 10 }
@@ -30,8 +34,10 @@ export const renderWatermarkText = async (text) => {
         .png()
         .toBuffer();
 
-    return sharp(shadow)
+    const rendered = await sharp(shadow)
         .composite([{ input: glyphs, left: SHADOW_PADDING, top: SHADOW_PADDING }])
         .png()
         .toBuffer();
+    log.debug('Watermark text rendered', { bytes: rendered.length });
+    return rendered;
 };

@@ -1,4 +1,7 @@
 import db from "../repository/db.repository.js";
+import logger from "../logger.js";
+
+const log = logger.child("init-db-dev");
 
 const { umzug, Collection, Photo } = db;
 
@@ -37,26 +40,28 @@ const collectionsData = [
 ];
 
 async function initDbDev() {
+    log.warn("Resetting the database: reverting every migration");
     await umzug.down({ to: 0 });
     await umzug.up();
-    console.log("Database schema reset via migrations.");
+    log.info("Database schema reset via migrations");
 
     for (const { photos, ...collectionAttrs } of collectionsData) {
         const collection = await Collection.create(collectionAttrs);
+        log.debug("Seeding collection", { collectionId: collection.id, name: collection.name, photoCount: photos.length });
         await Photo.bulkCreate(
             photos.map((photo, position) => ({ ...photo, position, collectionId: collection.id }))
         );
     }
 
-    console.log(`Seeded ${collectionsData.length} collections.`);
+    log.info("Collections seeded", { count: collectionsData.length });
 }
 
 initDbDev()
     .then(() => {
-        console.log("Dev database initialized successfully.");
+        log.info("Dev database initialized successfully");
         process.exit(0);
     })
     .catch((error) => {
-        console.error("Failed to initialize dev database:", error);
+        log.error("Failed to initialize dev database", error);
         process.exit(1);
     });
