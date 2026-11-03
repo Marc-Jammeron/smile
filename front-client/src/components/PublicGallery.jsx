@@ -5,6 +5,7 @@ import { STATUS } from 'front-shared/src/constants/collectionStatus.js'
 import ClientGalleryHeader from 'front-shared/src/ClientGalleryHeader.jsx'
 import { buildBrandingStyle } from 'front-shared/src/brandingStyle.js'
 import { getClientGallery, updateClientPhotoSelection, validateClientSelection, downloadAllDeliveredPhotos } from '../api/publicGallery.js'
+import ReviewCard from './ReviewCard.jsx'
 import '../App.css'
 
 const extractZipFilename = (contentDisposition, fallback) => {
@@ -121,6 +122,7 @@ export default function PublicGallery({ token }) {
     const { collection, photos, photographerName, branding } = state
     const isSelecting = collection.status === STATUS.SELECTING
     const isReady = collection.status === STATUS.READY
+    const isValidated = collection.status === STATUS.EDITING
     const selectedCount = photos.filter(photo => photo.status === 'SELECTED').length
     const canValidate = selectedCount >= collection.maxPhotos
 
@@ -141,7 +143,7 @@ export default function PublicGallery({ token }) {
                 photographerName={photographerName}
                 title={collection.name}
                 showWelcome={isSelecting}
-                clientMessage={isSelecting ? collection.clientMessage : null}
+                clientMessage={isSelecting ? collection.clientMessage : isReady ? collection.finalMessage : null}
                 subtitle={isSelecting
                     ? null
                     : isReady
@@ -195,6 +197,9 @@ export default function PublicGallery({ token }) {
                         </button>
                     </div>
                 )}
+
+                {isReady && <ReviewCard variant="ready" />}
+                {isValidated && <ReviewCard variant="validated" />}
             </div>
 
             {lightboxIndex !== null && (

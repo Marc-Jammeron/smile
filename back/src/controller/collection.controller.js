@@ -1,5 +1,5 @@
 import logger from '../logger.js';
-import { getAllCollections, getCollectionById, createCollection, updateCollection, deleteCollection, revokeCollectionAccess, streamSelectionHdZip, markCollectionAsReady } from '../services/collection.service.js';
+import { getAllCollections, getCollectionById, createCollection, updateCollection, pickCollectionFields, UPDATABLE_COLLECTION_FIELDS, deleteCollection, revokeCollectionAccess, streamSelectionHdZip, markCollectionAsReady } from '../services/collection.service.js';
 
 const log = logger.child('collection.controller');
 
@@ -35,14 +35,19 @@ export const createNewCollectionController = async (req, res) => {
         log.info('Collection created', { collectionId: newCollection.id, name: newCollection.name, status: newCollection.status });
         res.status(201).json(newCollection);
     } catch (error) {
-        res.status(500).json({ error: 'Failed to create collection' });
+        res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed to create collection' });
     }
 };
 
 export const updateExistingCollectionController = async (req, res) => {
     const { id } = req.params;
     try {
-        const updated = await updateCollection(id, req.body);
+        const changes = pickCollectionFields(req.body, UPDATABLE_COLLECTION_FIELDS);
+        if (Object.keys(changes).length === 0) {
+            log.warn('Collection update refused: no updatable field in the payload', { collectionId: id, received: Object.keys(req.body ?? {}) });
+            return res.status(400).json({ error: 'No updatable field provided' });
+        }
+        const updated = await updateCollection(id, changes);
         if (updated) {
             log.info('Collection updated', { collectionId: id, fields: Object.keys(req.body ?? {}), status: updated.status });
             res.json(updated);

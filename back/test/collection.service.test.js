@@ -21,10 +21,15 @@ let deletedPrefixes = [];
 let failingS3Key = null;
 let photoFindAllOptions = [];
 let collectionFindOptions = [];
+let createdCollectionData = null;
 
 mock.module('../src/repository/db.repository.js', {
     defaultExport: {
         Collection: {
+            create: async (data) => {
+                createdCollectionData = data;
+                return { id: 'new-col', ...data };
+            },
             findByPk: async (_id, options) => {
                 collectionFindOptions.push(options);
                 return currentCollection;
@@ -102,7 +107,7 @@ mock.module('../src/services/image-processing.service.js', {
     },
 });
 
-const { streamSelectionHdZip, markCollectionAsReady, streamDeliveredZip, getAllCollections, getCollectionById, updateCollection, deleteCollection, CLIENT_MESSAGE_MAX_LENGTH } = await import('../src/services/collection.service.js');
+const { streamSelectionHdZip, markCollectionAsReady, streamDeliveredZip, getAllCollections, getCollectionById, createCollection, updateCollection, pickCollectionFields, UPDATABLE_COLLECTION_FIELDS, ALLOWED_STATUS_TRANSITIONS, deleteCollection, CLIENT_MESSAGE_MAX_LENGTH } = await import('../src/services/collection.service.js');
 
 // Minimal stand-in for an Express `res`: a writable sink that flips `headersSent`
 // on the first chunk, mirroring how a real http.ServerResponse behaves once
@@ -244,6 +249,32 @@ test('markCollectionAsReady throws 409 when the collection is not in EDITING sta
     );
 });
 
+test('markCollectionAsReady generates a client access token for a collection that never went through SELECTING', async () => {
+    currentCollection = { id: 'col-1', name: 'Mariage Dupont', status: 'EDITING', accessToken: null };
+    currentDeliveredCount = 3;
+    currentNonDeliveredPhotos = [];
+    collectionUpdateCalls = [];
+    deletedS3Keys = [];
+
+    const updated = await markCollectionAsReady('col-1');
+
+    assert.equal(collectionUpdateCalls.length, 1);
+    assert.equal(collectionUpdateCalls[0].data.status, 'READY');
+    assert.ok(collectionUpdateCalls[0].data.accessToken, 'expected an access token for a collection that never went through SELECTING');
+    assert.equal(updated.status, 'READY');
+});
+
+test('markCollectionAsReady keeps the existing access token of a collection that went through SELECTING', async () => {
+    currentCollection = { id: 'col-1', name: 'Mariage Dupont', status: 'EDITING', accessToken: 'existing-token' };
+    currentDeliveredCount = 1;
+    currentNonDeliveredPhotos = [];
+    collectionUpdateCalls = [];
+
+    await markCollectionAsReady('col-1');
+
+    assert.equal('accessToken' in collectionUpdateCalls[0].data, false);
+});
+
 test('markCollectionAsReady throws 400 when no DELIVERED photo exists', async () => {
     currentCollection = { id: 'col-1', name: 'Mariage Dupont', status: 'EDITING' };
     currentDeliveredCount = 0;
@@ -332,6 +363,96 @@ test('streamDeliveredZip streams only the DELIVERED photos of the requested coll
     assert.ok(res.chunks.length > 0, 'expected at least one chunk of zip data');
 });
 
+test('createCollection accepts the DRAFT and EDITING statuses and defaults when no status is given', async () => {
+    for (const status of ['DRAFT', 'EDITING']) {
+        createdCollectionData = null;
+        await createCollection({ name: 'Mariage', clientName: 'Dupont', status });
+        assert.equal(createdCollectionData.status, status);
+    }
+    createdCollectionData = null;
+    await createCollection({ name: 'Mariage', clientName: 'Dupont' });
+    assert.ok(createdCollectionData, 'expected the collection to be created without an explicit status');
+});
+
+test('createCollection refuses SELECTING, READY and ARCHIVED with a 400 and creates nothing', async () => {
+    for (const status of ['SELECTING', 'READY', 'ARCHIVED', 'NOPE']) {
+        createdCollectionData = null;
+        await assert.rejects(
+            () => createCollection({ name: 'Mariage', clientName: 'Dupont', status }),
+            (error) => {
+                assert.equal(error.status, 400);
+                return true;
+            }
+        );
+        assert.equal(createdCollectionData, null, `${status} must not reach the database`);
+    }
+});
+
+test('createCollection only keeps the whitelisted fields (no access token or viewed flag from the client)', async () => {
+    createdCollectionData = null;
+    await createCollection({ name: 'Mariage', clientName: 'Dupont', maxPhotos: 5, accessToken: 'forged', accessTokenRevokedAt: null, viewedByCustomer: true, id: 'forged-id' });
+    assert.deepEqual(createdCollectionData, { name: 'Mariage', clientName: 'Dupont', maxPhotos: 5 });
+});
+
+test('pickCollectionFields drops unknown and server-managed fields on update', () => {
+    const picked = pickCollectionFields({ status: 'EDITING', clientMessage: 'Hi', finalMessage: 'Bye', accessToken: 'x', accessTokenExpiresAt: 'x', viewedByCustomer: true }, UPDATABLE_COLLECTION_FIELDS);
+    assert.deepEqual(picked, { status: 'EDITING', clientMessage: 'Hi', finalMessage: 'Bye' });
+    assert.deepEqual(pickCollectionFields(undefined, UPDATABLE_COLLECTION_FIELDS), {});
+});
+
+test('updateCollection refuses forbidden status transitions with a 400 and writes nothing', async () => {
+    const forbidden = [
+        ['DRAFT', 'READY'], ['SELECTING', 'READY'], ['EDITING', 'READY'],
+        ['EDITING', 'DRAFT'], ['READY', 'EDITING'], ['READY', 'SELECTING'],
+        ['ARCHIVED', 'DRAFT'], ['ARCHIVED', 'READY'], ['DRAFT', 'NOPE'],
+    ];
+    for (const [from, to] of forbidden) {
+        currentCollection = { id: 'c1', status: from };
+        collectionUpdateCalls = [];
+        await assert.rejects(
+            () => updateCollection('c1', { status: to }),
+            (error) => {
+                assert.equal(error.status, 400);
+                return true;
+            },
+            `${from} -> ${to} should be refused`
+        );
+        assert.equal(collectionUpdateCalls.length, 0, `${from} -> ${to} must not reach the database`);
+    }
+});
+
+test('updateCollection accepts every transition listed in ALLOWED_STATUS_TRANSITIONS', async () => {
+    for (const [from, targets] of Object.entries(ALLOWED_STATUS_TRANSITIONS)) {
+        for (const to of targets) {
+            currentCollection = { id: 'c1', status: from, accessToken: 'token' };
+            collectionUpdateCalls = [];
+            await updateCollection('c1', { status: to });
+            assert.equal(collectionUpdateCalls[0].data.status, to, `${from} -> ${to} should be accepted`);
+        }
+    }
+});
+
+test('updateCollection treats a status equal to the current one as a no-op change, even for ARCHIVED', async () => {
+    currentCollection = { id: 'c1', status: 'ARCHIVED' };
+    collectionUpdateCalls = [];
+    await updateCollection('c1', { status: 'ARCHIVED' });
+    assert.equal(collectionUpdateCalls.length, 1);
+});
+
+test('updateCollection returns null when the collection does not exist and a status is requested', async () => {
+    currentCollection = null;
+    collectionUpdateCalls = [];
+    assert.equal(await updateCollection('missing', { status: 'EDITING' }), null);
+    assert.equal(collectionUpdateCalls.length, 0);
+});
+
+test('updateCollection generates an access token when a DRAFT collection enters SELECTING', async () => {
+    currentCollection = { id: 'c1', status: 'DRAFT', accessToken: null };
+    collectionUpdateCalls = [];
+    await updateCollection('c1', { status: 'SELECTING' });
+    assert.ok(collectionUpdateCalls[0].data.accessToken);
+});
+
 test('updateCollection trims clientMessage and stores an empty one as null', async () => {
     currentCollection = { id: 'c1', status: 'SELECTING' };
     collectionUpdateCalls = [];
@@ -344,6 +465,24 @@ test('updateCollection trims clientMessage and stores an empty one as null', asy
 
     await updateCollection('c1', { clientMessage: null });
     assert.equal(collectionUpdateCalls[2].data.clientMessage, null);
+});
+
+test('updateCollection trims finalMessage, stores an empty one as null and rejects one over the limit', async () => {
+    currentCollection = { id: 'c1', status: 'READY' };
+    collectionUpdateCalls = [];
+
+    await updateCollection('c1', { finalMessage: '  Merci !  ' });
+    assert.equal(collectionUpdateCalls[0].data.finalMessage, 'Merci !');
+    assert.equal('clientMessage' in collectionUpdateCalls[0].data, false);
+
+    await updateCollection('c1', { finalMessage: '   ' });
+    assert.equal(collectionUpdateCalls[1].data.finalMessage, null);
+
+    await assert.rejects(
+        () => updateCollection('c1', { finalMessage: 'a'.repeat(CLIENT_MESSAGE_MAX_LENGTH + 1) }),
+        (error) => error.status === 400
+    );
+    assert.equal(collectionUpdateCalls.length, 2);
 });
 
 test('updateCollection rejects a clientMessage longer than the limit with a 400', async () => {

@@ -34,9 +34,43 @@ export const getCollectionById = async (id) => {
     }
 };
 
-export const createCollection = async (collectionData) => {
+// A new collection can only start as a DRAFT or straight in EDITING (final photos
+// uploaded directly, no client selection). SELECTING needs the access token and the
+// photos to be set up, READY needs delivered photos and ARCHIVED is an end state: all
+// of them are reached through updateCollection / markCollectionAsReady.
+export const CREATABLE_STATUSES = ['DRAFT', 'EDITING'];
+
+// Statuses a collection can be moved to from each status (the card's dropdown, i.e. the
+// PUT route). READY is absent from every list on purpose: it is only reachable through
+// markCollectionAsReady, which checks the delivered photos and cleans up the rest.
+// ARCHIVED is final. Must match ALLOWED_STATUS_TRANSITIONS in front-shared.
+export const ALLOWED_STATUS_TRANSITIONS = {
+    DRAFT: ['SELECTING', 'EDITING', 'ARCHIVED'],
+    SELECTING: ['DRAFT', 'EDITING', 'ARCHIVED'],
+    EDITING: ['SELECTING', 'ARCHIVED'],
+    READY: ['ARCHIVED'],
+    ARCHIVED: []
+};
+
+// Only these fields can be written from a request body. Everything else (accessToken,
+// accessTokenExpiresAt, accessTokenRevokedAt, viewedByCustomer, id, timestamps...) is
+// managed by the server and must never come from the client.
+export const CREATABLE_COLLECTION_FIELDS = ['name', 'clientName', 'status', 'maxPhotos', 'clientMessage', 'finalMessage'];
+export const UPDATABLE_COLLECTION_FIELDS = ['name', 'clientName', 'status', 'maxPhotos', 'clientMessage', 'finalMessage'];
+
+export const pickCollectionFields = (data, allowedFields) =>
+    Object.fromEntries(Object.entries(data ?? {}).filter(([field]) => allowedFields.includes(field)));
+
+export const createCollection = async (rawCollectionData) => {
     try {
-        log.debug("Creating collection", { fields: Object.keys(collectionData ?? {}) });
+        const collectionData = pickCollectionFields(rawCollectionData, CREATABLE_COLLECTION_FIELDS);
+        log.debug("Creating collection", { fields: Object.keys(collectionData) });
+        if (collectionData?.status !== undefined && !CREATABLE_STATUSES.includes(collectionData.status)) {
+            log.warn("Collection creation refused: status not allowed at creation", { status: collectionData.status });
+            const error = new Error(`A collection can only be created in ${CREATABLE_STATUSES.join(' or ')} status`);
+            error.status = 400;
+            throw error;
+        }
         const newCollection = await db.Collection.create(collectionData);
         return newCollection;
     } catch (error) {
@@ -45,26 +79,46 @@ export const createCollection = async (collectionData) => {
     }
 };
 
-export const CLIENT_MESSAGE_MAX_LENGTH = 500;
+export const CLIENT_MESSAGE_MAX_LENGTH = 3000;
+const CLIENT_MESSAGE_FIELDS = ['clientMessage', 'finalMessage'];
+
+const assertStatusTransitionAllowed = (collection, newStatus) => {
+    if (collection.status === newStatus) return;
+    if (!ALLOWED_STATUS_TRANSITIONS[collection.status]?.includes(newStatus)) {
+        log.warn("Status change refused: transition not allowed", { collectionId: collection.id, from: collection.status, to: newStatus });
+        const error = newStatus === 'READY'
+            ? new Error('Use "mark as ready" to deliver a collection.')
+            : new Error(`A collection cannot go from ${collection.status} to ${newStatus}`);
+        error.status = 400;
+        throw error;
+    }
+};
 
 export const updateCollection = async (id, collectionData) => {
     try {
-        if ('clientMessage' in collectionData) {
-            const clientMessage = typeof collectionData.clientMessage === 'string'
-                ? collectionData.clientMessage.trim() || null
+        // clientMessage is shown while the client selects, finalMessage once the collection is READY.
+        for (const field of CLIENT_MESSAGE_FIELDS) {
+            if (!(field in collectionData)) continue;
+            const message = typeof collectionData[field] === 'string'
+                ? collectionData[field].trim() || null
                 : null;
-            if (clientMessage && clientMessage.length > CLIENT_MESSAGE_MAX_LENGTH) {
-                log.debug("Client message too long", { collectionId: id, length: clientMessage.length, max: CLIENT_MESSAGE_MAX_LENGTH });
+            if (message && message.length > CLIENT_MESSAGE_MAX_LENGTH) {
+                log.debug("Client message too long", { collectionId: id, field, length: message.length, max: CLIENT_MESSAGE_MAX_LENGTH });
                 const error = new Error(`Le message client ne peut pas dépasser ${CLIENT_MESSAGE_MAX_LENGTH} caractères.`);
                 error.status = 400;
                 throw error;
             }
-            collectionData = { ...collectionData, clientMessage };
+            collectionData = { ...collectionData, [field]: message };
         }
 
-        if (collectionData.status === 'SELECTING') {
+        if (collectionData.status !== undefined) {
             const collection = await db.Collection.findByPk(id);
-            if (collection && !collection.accessToken) {
+            if (!collection) {
+                log.debug("Collection to update not found", { collectionId: id });
+                return null;
+            }
+            assertStatusTransitionAllowed(collection, collectionData.status);
+            if (collectionData.status === 'SELECTING' && !collection.accessToken) {
                 collectionData = { ...collectionData, accessToken: crypto.randomBytes(32).toString('base64url') };
                 log.info("Access token generated for collection entering SELECTING", { collectionId: id });
             }
@@ -307,7 +361,14 @@ export const markCollectionAsReady = async (id) => {
             transaction
         });
 
-        await db.Collection.update({ status: 'READY' }, { where: { id }, transaction });
+        // A collection created straight in EDITING (no client selection) never went through SELECTING,
+        // so it has no client link yet: it must get one now that the client can see it.
+        const readyData = { status: 'READY' };
+        if (!collection.accessToken) {
+            readyData.accessToken = crypto.randomBytes(32).toString('base64url');
+            log.info("Access token generated for collection entering READY", { collectionId: id });
+        }
+        await db.Collection.update(readyData, { where: { id }, transaction });
     });
 
     log.info("Collection flagged READY in database", { collectionId: id, discardedPhotos: photosToDelete.length, discardedAttachments: attachmentsToDelete.length });

@@ -1037,3 +1037,80 @@
     }
   }
 }
+
+/* Invitation à laisser un avis Google (vue client) */
+.client-review-card {
+  max-width: 560px;
+  margin: 56px auto 0;
+  padding: 28px 32px;
+  box-sizing: border-box;
+  text-align: center;
+  background: oklch(99% 0.004 80);
+  border: 1px solid oklch(88% 0.01 80);
+  border-radius: 2px;
+}
+
+.client-review-title {
+  margin: 0 0 10px;
+  font-family: var(--font-heading);
+  font-size: 26px;
+  font-weight: 500;
+  color: oklch(18% 0.005 80);
+}
+
+.client-review-text {
+  margin: 0 0 20px;
+  font-size: 15px;
+  line-height: 1.5;
+  color: oklch(45% 0.01 80);
+  /* Respecte les retours à la ligne ("\n") du texte. */
+  white-space: pre-line;
+}
+
+.client-review-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+
+.client-review-link {
+  display: inline-block;
+  font-family: var(--font-heading);
+  font-size: 19px;
+  font-weight: 600;
+  letter-spacing: 1px;
+  text-decoration: none;
+  color: oklch(97.5% 0.006 80);
+  background: oklch(18% 0.005 80);
+  border: 1px solid oklch(18% 0.005 80);
+  border-radius: 2px;
+  padding: 12px 32px;
+  transition: background 0.2s ease;
+
+  &:hover {
+    background: oklch(38% 0.01 80);
+  }
+}
+
+.client-review-dismiss {
+  font: inherit;
+  font-size: 13px;
+  color: oklch(55% 0.01 80);
+  background: none;
+  border: none;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+/* Vue "prêtes" : mise en avant plus marquée que la version discrète après validation. */
+.client-review-card-ready {
+  padding: 36px 32px;
+  border-color: oklch(18% 0.005 80);
+}
+
+@media (max-width: 600px) {
+  .client-review-card {
+    padding: 24px 20px;
+  }
+}
