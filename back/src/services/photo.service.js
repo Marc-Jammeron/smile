@@ -2,6 +2,8 @@ import db from "../repository/db.repository.js";
 import s3Repository from "../repository/s3.repository.js";
 import { generateDerivedImages } from "./image-processing.service.js";
 import { isMainPhotoFilename, isBlacklistedFilename } from "./filename.util.js";
+import { LIMITS } from "../config/limits.js";
+import { SIGNED_URL_TTL_SECONDS } from "../config/signed-urls.js";
 import logger from "../logger.js";
 
 const log = logger.child("photo.service");
@@ -22,14 +24,77 @@ const assertCollectionAcceptsAttachments = async (collectionId) => {
     }
 };
 
+const badRequest = (message) => Object.assign(new Error(message), { status: 400 });
+
+const UPLOAD_KEY_PREFIX = 'uploads';
+const ATTACHMENT_KEY_PREFIX = 'attachments';
+
+// Keys are minted by this server (`<prefix>/<collectionId>/<uuid>-<filename>`): a key that
+// does not live under its own collection's prefix was never issued for it.
+const assertKeyBelongsToCollection = (key, prefix, collectionId) => {
+    if (typeof key !== 'string' || typeof collectionId !== 'string' || !key.startsWith(`${prefix}/${collectionId}/`)) {
+        log.warn("Refused: key does not belong to the collection", { collectionId, key: typeof key === 'string' ? key : null, prefix });
+        throw badRequest(`Key ${typeof key === 'string' ? key : '(invalid)'} does not belong to collection ${collectionId}`);
+    }
+};
+
+const assertOptionalArray = (value, name) => {
+    if (value !== undefined && !Array.isArray(value)) {
+        throw badRequest(`${name} must be an array`);
+    }
+};
+
+const assertPresignRequest = ({ collectionId, files }) => {
+    if (typeof collectionId !== 'string' || collectionId === '') {
+        throw badRequest('collectionId is required');
+    }
+    if (!Array.isArray(files)) {
+        throw badRequest('files must be an array');
+    }
+    if (files.length > LIMITS.maxPresignFiles) {
+        log.warn("Presign refused: too many files", { collectionId, fileCount: files.length, max: LIMITS.maxPresignFiles });
+        throw badRequest(`Too many files in one upload request (${files.length}, max ${LIMITS.maxPresignFiles})`);
+    }
+    if (files.some((file) => file === null || typeof file !== 'object')) {
+        throw badRequest('Each file must be an object');
+    }
+};
+
+const assertConfirmRequest = ({ photos, attachmentsToExistingPhotos }) => {
+    assertOptionalArray(photos, 'photos');
+    assertOptionalArray(attachmentsToExistingPhotos, 'attachmentsToExistingPhotos');
+    const photoList = photos ?? [];
+    const existingList = attachmentsToExistingPhotos ?? [];
+
+    if (photoList.length > LIMITS.maxConfirmPhotos) {
+        log.warn("Confirm refused: too many photos", { photoCount: photoList.length, max: LIMITS.maxConfirmPhotos });
+        throw badRequest(`Too many photos in one confirm request (${photoList.length}, max ${LIMITS.maxConfirmPhotos})`);
+    }
+    if ([...photoList, ...existingList].some((item) => item === null || typeof item !== 'object')) {
+        throw badRequest('Each photo and attachment group must be an object');
+    }
+    for (const item of [...photoList, ...existingList]) {
+        assertOptionalArray(item.attachments, 'attachments');
+    }
+    if (existingList.some((item) => !Array.isArray(item.attachments))) {
+        throw badRequest('attachments must be an array');
+    }
+
+    const attachmentCount = [...photoList, ...existingList].reduce((sum, item) => sum + (item.attachments?.length ?? 0), 0);
+    if (attachmentCount > LIMITS.maxConfirmAttachments) {
+        log.warn("Confirm refused: too many attachments", { attachmentCount, max: LIMITS.maxConfirmAttachments });
+        throw badRequest(`Too many attachments in one confirm request (${attachmentCount}, max ${LIMITS.maxConfirmAttachments})`);
+    }
+};
+
 const PHOTO_ORDER = [['position', 'ASC'], ['id', 'ASC']];
 
 const toPhotoDTO = async (photo) => {
     const { key, thumbnailKey, previewKey } = photo;
     const [url, thumbnailUrl, previewUrl] = await Promise.all([
-        s3Repository.getSignedDownloadUrl(key),
-        thumbnailKey ? s3Repository.getSignedDownloadUrl(thumbnailKey) : Promise.resolve(null),
-        previewKey ? s3Repository.getSignedDownloadUrl(previewKey) : Promise.resolve(null)
+        s3Repository.getSignedDownloadUrl(key, { expiresIn: SIGNED_URL_TTL_SECONDS.original }),
+        thumbnailKey ? s3Repository.getSignedDownloadUrl(thumbnailKey, { expiresIn: SIGNED_URL_TTL_SECONDS.preview }) : Promise.resolve(null),
+        previewKey ? s3Repository.getSignedDownloadUrl(previewKey, { expiresIn: SIGNED_URL_TTL_SECONDS.preview }) : Promise.resolve(null)
     ]);
     return { ...photo.toJSON(), url, thumbnailUrl, previewUrl };
 };
@@ -39,10 +104,11 @@ const toPhotoDTO = async (photo) => {
 // so the client gallery never leaks the original HD file, signed or not.
 const toClientPhotoDTO = async (photo) => {
     const { thumbnailKey, previewKey } = photo;
+    const previewTtl = { expiresIn: SIGNED_URL_TTL_SECONDS.preview };
     const [url, thumbnailUrl, previewUrl] = await Promise.all([
-        previewKey ? s3Repository.getSignedDownloadUrl(previewKey) : Promise.resolve(null),
-        thumbnailKey ? s3Repository.getSignedDownloadUrl(thumbnailKey) : Promise.resolve(null),
-        previewKey ? s3Repository.getSignedDownloadUrl(previewKey) : Promise.resolve(null)
+        previewKey ? s3Repository.getSignedDownloadUrl(previewKey, previewTtl) : Promise.resolve(null),
+        thumbnailKey ? s3Repository.getSignedDownloadUrl(thumbnailKey, previewTtl) : Promise.resolve(null),
+        previewKey ? s3Repository.getSignedDownloadUrl(previewKey, previewTtl) : Promise.resolve(null)
     ]);
     const { key, ...photoWithoutKey } = photo.toJSON();
     return { ...photoWithoutKey, url, thumbnailUrl, previewUrl };
@@ -101,8 +167,9 @@ const assertCollectionInEditingStatus = async (collectionId) => {
     }
 };
 
-export const createPhotosBatch = async ({ collectionId, files, targetStatus = 'PENDING' }) => {
+export const createPhotosBatch = async ({ collectionId, files, targetStatus = 'PENDING' } = {}) => {
     try {
+        assertPresignRequest({ collectionId, files });
         log.debug("Creating upload urls", { collectionId, targetStatus, fileCount: files.length });
         if (targetStatus === 'DELIVERED') {
             await assertCollectionInEditingStatus(collectionId);
@@ -132,8 +199,10 @@ export const createPhotosBatch = async ({ collectionId, files, targetStatus = 'P
 // Attachments never reach generateDerivedImages/sharp: they're persisted as-is,
 // restituted as-is at delivery, with no format-specific logic anywhere (spec's
 // "opaque attachment" principle).
-const confirmAttachment = async (attachmentData, photoId) => {
+const confirmAttachment = async (attachmentData, photoId, collectionId) => {
     const { key, contentType, size, filename } = attachmentData;
+
+    assertKeyBelongsToCollection(key, ATTACHMENT_KEY_PREFIX, collectionId);
 
     if (isBlacklistedFilename(filename, size)) {
         log.warn("Attachment refused: blacklisted filename or size", { photoId, filename, size });
@@ -170,7 +239,7 @@ const confirmAttachmentForExistingPhoto = async (attachmentData, photoId) => {
         throw error;
     }
     await assertCollectionAcceptsAttachments(photo.collectionId);
-    return confirmAttachment(attachmentData, photoId);
+    return confirmAttachment(attachmentData, photoId, photo.collectionId);
 };
 
 // Extension is checked here (not just at grouping time on the client) so a CR2
@@ -180,6 +249,8 @@ const confirmPhoto = async (photoData, targetStatus, position) => {
         const { collectionId, key, contentType, size, description, filename, attachments = [] } = photoData;
 
         log.debug("Confirming photo", { collectionId, key, filename, size, targetStatus, position, attachmentCount: attachments.length });
+
+        assertKeyBelongsToCollection(key, UPLOAD_KEY_PREFIX, collectionId);
 
         if (!isMainPhotoFilename(filename)) {
             log.warn("Photo refused: unsupported main photo format", { collectionId, filename });
@@ -207,7 +278,7 @@ const confirmPhoto = async (photoData, targetStatus, position) => {
         const newPhoto = await db.Photo.create({ collectionId, key, thumbnailKey, previewKey, contentType, size, description, originalFilename: filename, status: targetStatus, position });
 
         const attachmentResults = await Promise.allSettled(
-            attachments.map((attachmentData) => confirmAttachment(attachmentData, newPhoto.id))
+            attachments.map((attachmentData) => confirmAttachment(attachmentData, newPhoto.id, collectionId))
         );
         const failedAttachments = attachmentResults
             .map((result, index) => result.status === 'rejected' ? { key: attachments[index].key, error: result.reason.message } : null)
@@ -231,7 +302,9 @@ const getNextPosition = async (collectionId) => {
     return Number.isFinite(maxPosition) ? maxPosition + 1 : 0;
 };
 
-export const confirmPhotosBatch = async ({ photos = [], attachmentsToExistingPhotos = [], targetStatus = 'PENDING' }) => {
+export const confirmPhotosBatch = async ({ photos = [], attachmentsToExistingPhotos = [], targetStatus = 'PENDING' } = {}) => {
+    assertConfirmRequest({ photos, attachmentsToExistingPhotos });
+
     if (targetStatus === 'DELIVERED' && photos.length > 0) {
         await assertCollectionInEditingStatus(photos[0].collectionId);
     }

@@ -35,7 +35,7 @@ export const createNewPhotosBatch = async (req, res) => {
     try {
         const { collectionId, files, targetStatus } = req.body ?? {};
         log.info('Generating upload urls', { collectionId, fileCount: files?.length, targetStatus });
-        const urls = await createPhotosBatch(req.body);
+        const urls = await createPhotosBatch(req.body ?? {});
         res.status(200).json(urls);
     } catch (error) {
         res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed to generate upload urls' });
@@ -44,7 +44,7 @@ export const createNewPhotosBatch = async (req, res) => {
 
 export const confirmNewPhotosBatch = async (req, res) => {
     try {
-        const { photos, attachmentsToExistingPhotos, targetStatus } = req.body;
+        const { photos, attachmentsToExistingPhotos, targetStatus } = req.body ?? {};
         log.info('Confirming uploaded photos', {
             photoCount: photos?.length,
             attachmentsToExistingPhotosCount: attachmentsToExistingPhotos?.length,

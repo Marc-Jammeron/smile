@@ -2,6 +2,7 @@ import { S3Client, PutObjectCommand, GetObjectCommand, HeadObjectCommand, Delete
 import { Buffer } from "node:buffer";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { randomUUID } from "node:crypto";
+import { SIGNED_URL_TTL_SECONDS } from "../config/signed-urls.js";
 import logger from "../logger.js";
 
 const log = logger.child("s3");
@@ -39,7 +40,7 @@ const getSignedPutUrl = (key, contentType) => {
     });
 
     log.debug("Signing upload url", { key, contentType });
-    return getSignedUrl(s3, command, { expiresIn: 300 });
+    return getSignedUrl(s3, command, { expiresIn: SIGNED_URL_TTL_SECONDS.upload });
 };
 
 const getSignedUploadUrl = async (collectionId, filename, contentType) => {
@@ -62,14 +63,14 @@ const getSignedBrandingUploadUrl = async (kind, contentType) => {
     return { url, key };
 };
 
-const getSignedDownloadUrl = async (key) => {
+const getSignedDownloadUrl = async (key, { expiresIn = SIGNED_URL_TTL_SECONDS.default } = {}) => {
     const command = new GetObjectCommand({
         Bucket: BUCKET,
         Key: key,
     });
 
-    log.debug("Signing download url", { key });
-    const url = await getSignedUrl(s3, command, { expiresIn: 300 });
+    log.debug("Signing download url", { key, expiresIn });
+    const url = await getSignedUrl(s3, command, { expiresIn });
     return url;
 };
 

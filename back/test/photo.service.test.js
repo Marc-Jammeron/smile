@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 // connection (and calls process.exit on failure) as a module side effect.
 // Mock it (and s3.repository.js) before importing the service so the test
 // never touches a real database or AWS.
-const ORIGINAL_KEY = 'originals/collection-1/photo-1.jpg';
+const ORIGINAL_KEY = 'uploads/collection-1/photo-1.jpg';
 const PREVIEW_KEY = 'previews/collection-1/photo-1.jpg';
 const THUMBNAIL_KEY = 'thumbnails/collection-1/photo-1.jpg';
 
@@ -40,6 +40,7 @@ let destroyedWhere = null;
 let deletedS3Keys = [];
 let lastGenerateDerivedImagesCall = null;
 let currentAttachments = [];
+let signedDownloads = [];
 let createdAttachmentData = [];
 
 mock.module('../src/repository/db.repository.js', {
@@ -81,7 +82,12 @@ mock.module('../src/repository/db.repository.js', {
 // ended up in the presigned URL without needing real AWS credentials.
 mock.module('../src/repository/s3.repository.js', {
     defaultExport: {
-        getSignedDownloadUrl: async (key) => `https://s3.example.com/signed?key=${encodeURIComponent(key)}`,
+        getSignedDownloadUrl: async (key, options) => {
+            signedDownloads.push({ key, expiresIn: options?.expiresIn });
+            return `https://s3.example.com/signed?key=${encodeURIComponent(key)}`;
+        },
+        getSignedUploadUrl: async (collectionId, filename) => ({ url: 'https://s3.example.com/put', key: `uploads/${collectionId}/uuid-${filename}` }),
+        getSignedAttachmentUploadUrl: async (collectionId, filename) => ({ url: 'https://s3.example.com/put', key: `attachments/${collectionId}/uuid-${filename}` }),
         objectExists: async () => true,
         deleteObject: async (key) => {
             deletedS3Keys.push(key);
@@ -100,7 +106,7 @@ mock.module('../src/services/image-processing.service.js', {
     },
 });
 
-const { getAllClientPhotosByCollectionId, getAllPhotosByCollectionId, getDeliveredPhotosByCollectionId, getSelectedPhotosForCollection, getDeliveredPhotosForZip, confirmPhotosBatch, getPhotoDownloadFilename, deleteDeliveredPhoto } = await import('../src/services/photo.service.js');
+const { createPhotosBatch, getAllClientPhotosByCollectionId, getAllPhotosByCollectionId, getDeliveredPhotosByCollectionId, getSelectedPhotosForCollection, getDeliveredPhotosForZip, confirmPhotosBatch, getPhotoDownloadFilename, deleteDeliveredPhoto } = await import('../src/services/photo.service.js');
 
 test('getAllClientPhotosByCollectionId (client gallery path) never presigns the original S3 key', async () => {
     const [photo] = await getAllClientPhotosByCollectionId('collection-1');
@@ -375,4 +381,144 @@ test('deleteDeliveredPhoto returns null when the photo does not exist', async ()
     const result = await deleteDeliveredPhoto('missing-photo');
 
     assert.equal(result, null);
+});
+
+
+// --- Step C2: input validation, key ownership, presigned URL lifetimes ---
+
+const fileDescriptors = (count) => Array.from({ length: count }, (_, index) => ({ filename: `IMG_${index}.jpg`, contentType: 'image/jpeg' }));
+
+test('createPhotosBatch accepts exactly 50 files and rejects 51 with a 400 and a clear message', async () => {
+    currentCollectionStatus = 'SELECTING';
+    const accepted = await createPhotosBatch({ collectionId: 'collection-1', files: fileDescriptors(50) });
+    assert.equal(accepted.length, 50);
+
+    await assert.rejects(
+        () => createPhotosBatch({ collectionId: 'collection-1', files: fileDescriptors(51) }),
+        (error) => {
+            assert.equal(error.status, 400);
+            assert.match(error.message, /Too many files .*51.*max 50/);
+            return true;
+        }
+    );
+});
+
+test('createPhotosBatch rejects a missing body, a missing collectionId and non-array files with a 400', async () => {
+    for (const body of [undefined, {}, { collectionId: 'collection-1' }, { collectionId: 'collection-1', files: 'nope' }, { files: [] }]) {
+        await assert.rejects(() => createPhotosBatch(body), (error) => {
+            assert.equal(error.status, 400, JSON.stringify(body));
+            return true;
+        });
+    }
+});
+
+test('confirmPhotosBatch accepts exactly 10 photos and rejects 11 with a 400 before touching anything', async () => {
+    currentCollectionStatus = 'SELECTING';
+    createdPhotosData = [];
+    currentMaxPosition = null;
+    const { created } = await confirmPhotosBatch({ photos: makeBatch(10) });
+    assert.equal(created.length, 10);
+
+    createdPhotosData = [];
+    lastGenerateDerivedImagesCall = null;
+    await assert.rejects(
+        () => confirmPhotosBatch({ photos: makeBatch(11) }),
+        (error) => {
+            assert.equal(error.status, 400);
+            assert.match(error.message, /Too many photos .*11.*max 10/);
+            return true;
+        }
+    );
+    assert.equal(createdPhotosData.length, 0);
+    assert.equal(lastGenerateDerivedImagesCall, null);
+});
+
+test('confirmPhotosBatch rejects non-array photos / attachmentsToExistingPhotos with a 400', async () => {
+    for (const body of [{ photos: 'x' }, { photos: null }, { attachmentsToExistingPhotos: {} }, { photos: [null] }, { photos: [{ attachments: 'x' }] }, { attachmentsToExistingPhotos: [{ photoId: 'photo-1' }] }]) {
+        await assert.rejects(() => confirmPhotosBatch(body), (error) => {
+            assert.equal(error.status, 400, JSON.stringify(body));
+            return true;
+        });
+    }
+});
+
+const attachmentPayloads = (count) => Array.from({ length: count }, (_, index) => ({
+    key: `attachments/collection-1/uuid-IMG_${index}.CR2`, contentType: 'image/x-canon-cr2', size: 100, filename: `IMG_${index}.CR2`,
+}));
+
+test('confirmPhotosBatch accepts 50 attachments in total (nested + existing photos) and rejects 51 with a 400', async () => {
+    currentCollectionStatus = 'SELECTING';
+    currentFindByPkPhoto = fakePhoto;
+    createdAttachmentData = [];
+    const accepted = await confirmPhotosBatch({
+        photos: [],
+        attachmentsToExistingPhotos: [{ photoId: 'photo-1', attachments: attachmentPayloads(50) }],
+    });
+    assert.equal(accepted.createdAttachments.length, 50);
+
+    await assert.rejects(
+        () => confirmPhotosBatch({
+            photos: [{ collectionId: 'collection-1', key: ORIGINAL_KEY, contentType: 'image/jpeg', size: 1, filename: 'IMG_1.jpg', attachments: attachmentPayloads(1) }],
+            attachmentsToExistingPhotos: [{ photoId: 'photo-1', attachments: attachmentPayloads(50) }],
+        }),
+        (error) => {
+            assert.equal(error.status, 400);
+            assert.match(error.message, /Too many attachments .*51.*max 50/);
+            return true;
+        }
+    );
+});
+
+test('confirmPhotosBatch refuses (per photo) a key that was not issued for the photo\'s collection', async () => {
+    currentCollectionStatus = 'SELECTING';
+    createdPhotosData = [];
+    lastGenerateDerivedImagesCall = null;
+
+    const { created, failed } = await confirmPhotosBatch({
+        photos: [
+            { collectionId: 'collection-1', key: 'uploads/other-collection/uuid-IMG_1.jpg', contentType: 'image/jpeg', size: 1, filename: 'IMG_1.jpg' },
+            { collectionId: 'collection-1', key: 'branding/watermark/x.jpg', contentType: 'image/jpeg', size: 1, filename: 'IMG_2.jpg' },
+            { collectionId: 'collection-1', key: 'attachments/collection-1/uuid-IMG_3.jpg', contentType: 'image/jpeg', size: 1, filename: 'IMG_3.jpg' },
+            { collectionId: 'collection-1', key: 'uploads/collection-1/uuid-IMG_4.jpg', contentType: 'image/jpeg', size: 1, filename: 'IMG_4.jpg' },
+        ],
+    });
+
+    assert.deepEqual(created.map((photo) => photo.originalFilename), ['IMG_4.jpg']);
+    assert.equal(failed.length, 3);
+    assert.equal(createdPhotosData.length, 1);
+});
+
+test('confirmPhotosBatch refuses an attachment whose key is not under attachments/<collectionId>/ (nested and existing photo)', async () => {
+    currentCollectionStatus = 'SELECTING';
+    currentFindByPkPhoto = fakePhoto;
+    createdAttachmentData = [];
+    const badAttachment = { key: 'uploads/collection-1/uuid-IMG_9.CR2', contentType: 'image/x-canon-cr2', size: 100, filename: 'IMG_9.CR2' };
+    const foreignAttachment = { key: 'attachments/other/uuid-IMG_9.CR2', contentType: 'image/x-canon-cr2', size: 100, filename: 'IMG_9.CR2' };
+
+    const { created, failedAttachments, createdAttachments } = await confirmPhotosBatch({
+        photos: [{ collectionId: 'collection-1', key: ORIGINAL_KEY, contentType: 'image/jpeg', size: 1, filename: 'IMG_1.jpg', attachments: [badAttachment] }],
+        attachmentsToExistingPhotos: [{ photoId: 'photo-1', attachments: [foreignAttachment] }],
+    });
+
+    assert.equal(created.length, 1);
+    assert.equal(createdAttachments.length, 0);
+    assert.equal(createdAttachmentData.length, 0);
+    assert.deepEqual(failedAttachments.map((failure) => failure.key).sort(), [badAttachment.key, foreignAttachment.key].sort());
+});
+
+test('admin DTO presigns the original for 900 s and the thumbnail / preview for 3600 s', async () => {
+    signedDownloads = [];
+    await getAllPhotosByCollectionId('collection-1');
+    const ttlOf = (key) => signedDownloads.find((signed) => signed.key === key).expiresIn;
+    assert.equal(ttlOf(ORIGINAL_KEY), 900);
+    assert.equal(ttlOf(THUMBNAIL_KEY), 3600);
+    assert.equal(ttlOf(PREVIEW_KEY), 3600);
+});
+
+test('client DTO only presigns preview and thumbnail, both for 3600 s, and never the original', async () => {
+    signedDownloads = [];
+    await getAllClientPhotosByCollectionId('collection-1');
+    assert.ok(signedDownloads.length > 0);
+    assert.ok(signedDownloads.every((signed) => signed.expiresIn === 3600), JSON.stringify(signedDownloads));
+    assert.ok(signedDownloads.every((signed) => signed.key !== ORIGINAL_KEY));
 });
