@@ -9,7 +9,9 @@
     "dev": "nodemon -r dotenv/config server.js",
     "test": "node --experimental-test-module-mocks --test test/**/*.test.js",
     "init-db-dev": "node --env-file=.env src/scripts/init-db-dev.js",
-    "hash-password": "node --env-file=.env src/scripts/hash-password.js"
+    "hash-password": "node --env-file=.env src/scripts/hash-password.js",
+    "check-duplicates": "node --env-file=.env src/scripts/check-duplicates.js",
+    "purge-duplicates": "node --env-file=.env src/scripts/purge-duplicates.js"
   },
   "author": "",
   "license": "ISC",

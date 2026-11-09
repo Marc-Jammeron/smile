@@ -59,10 +59,12 @@ export const confirmNewPhotosBatch = async (req, res) => {
             createdAttachments: result.createdAttachments.length,
             failedAttachments: result.failedAttachments.length
         };
+        const alreadyConfirmed = result.created.filter((photo) => photo.alreadyConfirmed).length
+            + result.createdAttachments.filter((attachment) => attachment.alreadyConfirmed).length;
         if (summary.failed > 0 || summary.failedAttachments > 0) {
             log.warn('Photo batch confirmed with failures', { ...summary, failures: result.failed, failedAttachments: result.failedAttachments, ...getMemorySnapshot() });
         } else {
-            log.info('Photo batch confirmed', { ...summary, ...getMemorySnapshot() });
+            log.info('Photo batch confirmed', { ...summary, ...(alreadyConfirmed > 0 && { alreadyConfirmed }), ...getMemorySnapshot() });
         }
         res.status(201).json(result);
     } catch (error) {

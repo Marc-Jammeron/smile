@@ -230,10 +230,26 @@ export const createPhotosBatch = async ({ collectionId, files, targetStatus = 'P
     }
 };
 
+// A replayed confirm (same s3Key) must not create a second row. The same key already
+// attached to the SAME photo is a harmless replay; attached to ANOTHER photo is a conflict.
+const toReplayedAttachment = (attachment, photoId) => {
+    if (attachment.photoId !== photoId) {
+        log.warn("Attachment refused: key already attached to another photo", { photoId, otherPhotoId: attachment.photoId, key: attachment.s3Key });
+        const error = new Error(`Key ${attachment.s3Key} is already attached to another photo`);
+        error.status = 409;
+        throw error;
+    }
+    log.info("Attachment already confirmed, returning the existing row", { photoId, attachmentId: attachment.id });
+    return { ...attachment.toJSON(), alreadyConfirmed: true };
+};
+
 // Attachments never reach generateDerivedImages/sharp: they're persisted as-is,
 // restituted as-is at delivery, with no format-specific logic anywhere (spec's
 // "opaque attachment" principle).
-const confirmAttachment = async (attachmentData, photoId, collectionId) => {
+// `checkCollectionStatus`: callers that did not already assert that the collection accepts
+// attachments (existing photos, replays) ask for it here, after the replay lookup, so a pure
+// replay still succeeds once the collection has moved on.
+const confirmAttachment = async (attachmentData, photoId, collectionId, { checkCollectionStatus = false } = {}) => {
     const { key, contentType, size, filename } = attachmentData;
 
     assertKeyBelongsToCollection(key, ATTACHMENT_KEY_PREFIX, collectionId);
@@ -245,6 +261,15 @@ const confirmAttachment = async (attachmentData, photoId, collectionId) => {
         throw error;
     }
 
+    const alreadySaved = await db.PhotoAttachment.findOne({ where: { s3Key: key } });
+    if (alreadySaved) {
+        return toReplayedAttachment(alreadySaved, photoId);
+    }
+
+    if (checkCollectionStatus) {
+        await assertCollectionAcceptsAttachments(collectionId);
+    }
+
     const exists = await s3Repository.objectExists(key);
     if (!exists) {
         log.warn("Attachment confirmation refused: object missing in storage", { photoId, key });
@@ -253,13 +278,20 @@ const confirmAttachment = async (attachmentData, photoId, collectionId) => {
         throw error;
     }
 
-    const attachment = await db.PhotoAttachment.create({
-        photoId,
-        originalFilename: filename,
-        s3Key: key,
-        fileSize: size,
-        mimeType: contentType
+    // findOrCreate on top of the unique index: two concurrent confirms of the same key end
+    // with one row, the loser gets the winner's row.
+    const [attachment, wasCreated] = await db.PhotoAttachment.findOrCreate({
+        where: { s3Key: key },
+        defaults: {
+            photoId,
+            originalFilename: filename,
+            fileSize: size,
+            mimeType: contentType
+        }
     });
+    if (!wasCreated) {
+        return toReplayedAttachment(attachment, photoId);
+    }
     log.info("Attachment saved", { photoId, attachmentId: attachment.id, filename, size });
     return attachment.toJSON();
 };
@@ -272,8 +304,31 @@ const confirmAttachmentForExistingPhoto = async (attachmentData, photoId) => {
         error.status = 404;
         throw error;
     }
-    await assertCollectionAcceptsAttachments(photo.collectionId);
-    return confirmAttachment(attachmentData, photoId, photo.collectionId);
+    return confirmAttachment(attachmentData, photoId, photo.collectionId, { checkCollectionStatus: true });
+};
+
+const settleAttachments = async (attachments, photoId, collectionId, options) => {
+    const results = await Promise.allSettled(
+        attachments.map((attachmentData) => confirmAttachment(attachmentData, photoId, collectionId, options))
+    );
+    const failedAttachments = results
+        .map((result, index) => result.status === 'rejected' ? { key: attachments[index].key, error: result.reason.message } : null)
+        .filter(Boolean);
+    return { results, failedAttachments };
+};
+
+// The photo's key is already registered: a retried confirm. Nothing is downloaded or
+// processed; the existing row comes back (HTTP 201, in `created`, flagged alreadyConfirmed)
+// and any nested attachment that is still missing is completed.
+const replayConfirmedPhoto = async (photo, attachments, collectionId) => {
+    log.info("Photo already confirmed, returning the existing row", { photoId: photo.id, collectionId, key: photo.key });
+    const { failedAttachments } = await settleAttachments(attachments, photo.id, collectionId, { checkCollectionStatus: true });
+    if (failedAttachments.length > 0) {
+        log.warn("Replayed photo: some attachments failed", { photoId: photo.id, failedAttachments });
+    }
+    const filenamesByPhotoId = await loadAttachmentFilenamesByPhotoId([photo.id]);
+    const photoDTO = await toPhotoDTO(photo, filenamesByPhotoId.get(photo.id) ?? []);
+    return { ...photoDTO, alreadyConfirmed: true, failedAttachments };
 };
 
 // Extension is checked here (not just at grouping time on the client) so a CR2
@@ -291,6 +346,13 @@ const confirmPhoto = async (photoData, targetStatus, position, { getWatermarkCon
             const error = new Error(`File ${filename} is not a supported main photo format (expected .jpg/.jpeg)`);
             error.status = 400;
             throw error;
+        }
+
+        // Retried confirm (same key already registered): answer from the database, before
+        // spending a HEAD, a download and a decode on it.
+        const alreadyConfirmed = await db.Photo.findOne({ where: { collectionId, key } });
+        if (alreadyConfirmed) {
+            return await replayConfirmedPhoto(alreadyConfirmed, attachments, collectionId);
         }
 
         // HEAD instead of a bare existence check: its ContentLength is the authoritative size
@@ -328,14 +390,17 @@ const confirmPhoto = async (photoData, targetStatus, position, { getWatermarkCon
 
         log.debug("Derived images generated", { key, thumbnailKey, previewKey, watermarked });
 
-        const newPhoto = await db.Photo.create({ collectionId, key, thumbnailKey, previewKey, contentType, size, description, originalFilename: filename, status: targetStatus, position });
+        // findOrCreate on top of the (collectionId, key) unique index: if a concurrent confirm
+        // of the same key won the race, its row is returned instead of a duplicate.
+        const [newPhoto, wasCreated] = await db.Photo.findOrCreate({
+            where: { collectionId, key },
+            defaults: { thumbnailKey, previewKey, contentType, size, description, originalFilename: filename, status: targetStatus, position }
+        });
+        if (!wasCreated) {
+            return await replayConfirmedPhoto(newPhoto, attachments, collectionId);
+        }
 
-        const attachmentResults = await Promise.allSettled(
-            attachments.map((attachmentData) => confirmAttachment(attachmentData, newPhoto.id, collectionId))
-        );
-        const failedAttachments = attachmentResults
-            .map((result, index) => result.status === 'rejected' ? { key: attachments[index].key, error: result.reason.message } : null)
-            .filter(Boolean);
+        const { results: attachmentResults, failedAttachments } = await settleAttachments(attachments, newPhoto.id, collectionId);
 
         if (failedAttachments.length > 0) {
             log.warn("Photo created but some attachments failed", { photoId: newPhoto.id, failedAttachments });

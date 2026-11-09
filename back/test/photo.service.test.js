@@ -41,8 +41,13 @@ let deletedS3Keys = [];
 let lastGenerateDerivedImagesCall = null;
 let currentAttachments = [];
 let signedDownloads = [];
+let existingPhotosByKey = {};
+let racedPhotosByKey = {};
+let existingAttachmentsByKey = {};
+let racedAttachmentsByKey = {};
 let attachmentFindAllCalls = [];
 let currentFindAllPhotos = null;
+let headCalls = 0;
 let headResult = { size: 1234, contentType: 'image/jpeg' };
 let activeGenerations = 0;
 let maxActiveGenerations = 0;
@@ -64,10 +69,15 @@ mock.module('../src/repository/db.repository.js', {
                 return currentMaxPosition;
             },
             findByPk: async () => currentFindByPkPhoto,
-            create: async (data) => {
+            findOne: async ({ where }) => existingPhotosByKey[where.key] ?? null,
+            findOrCreate: async ({ where, defaults }) => {
+                if (racedPhotosByKey[where.key]) {
+                    return [racedPhotosByKey[where.key], false];
+                }
+                const data = { ...defaults, ...where };
                 lastCreatedPhotoData = data;
                 createdPhotosData.push(data);
-                return { ...fakePhoto, ...data, toJSON() { return { ...fakePhoto.toJSON(), ...data }; } };
+                return [{ ...fakePhoto, ...data, toJSON() { return { ...fakePhoto.toJSON(), ...data }; } }, true];
             },
             destroy: async ({ where }) => {
                 destroyedWhere = where;
@@ -82,9 +92,15 @@ mock.module('../src/repository/db.repository.js', {
                 attachmentFindAllCalls.push(options);
                 return currentAttachments;
             },
-            create: async (data) => {
+            findOne: async ({ where }) => existingAttachmentsByKey[where.s3Key] ?? null,
+            findOrCreate: async ({ where, defaults }) => {
+                if (racedAttachmentsByKey[where.s3Key]) {
+                    return [racedAttachmentsByKey[where.s3Key], false];
+                }
+                const data = { ...defaults, s3Key: where.s3Key };
                 createdAttachmentData.push(data);
-                return { ...data, id: `attachment-${createdAttachmentData.length}`, toJSON() { return { ...data, id: `attachment-${createdAttachmentData.length}` }; } };
+                const id = `attachment-${createdAttachmentData.length}`;
+                return [{ ...data, id, toJSON() { return { ...data, id }; } }, true];
             },
         },
     },
@@ -101,7 +117,7 @@ mock.module('../src/repository/s3.repository.js', {
         getSignedUploadUrl: async (collectionId, filename) => ({ url: 'https://s3.example.com/put', key: `uploads/${collectionId}/uuid-${filename}` }),
         getSignedAttachmentUploadUrl: async (collectionId, filename) => ({ url: 'https://s3.example.com/put', key: `attachments/${collectionId}/uuid-${filename}` }),
         objectExists: async () => true,
-        headObject: async () => headResult,
+        headObject: async () => { headCalls += 1; return headResult; },
         deleteObject: async (key) => {
             deletedS3Keys.push(key);
             return true;
@@ -869,4 +885,192 @@ test('confirm returns attachmentCount / attachmentFilenames for the attachments 
     assert.equal(failedAttachments.length, 1);
     assert.equal(created[0].attachmentCount, 1);
     assert.deepEqual(created[0].attachmentFilenames, ['IMG_0099.CR2']);
+});
+
+
+// --- Step C6: idempotent confirm (a replay with the same keys never creates duplicates) ---
+
+const resetIdempotenceTracking = () => {
+    resetGenerationTracking();
+    resetAttachmentTracking();
+    existingPhotosByKey = {};
+    racedPhotosByKey = {};
+    existingAttachmentsByKey = {};
+    racedAttachmentsByKey = {};
+    createdAttachmentData = [];
+    headCalls = 0;
+    currentFindByPkPhoto = fakePhoto;
+};
+
+const existingPhotoRow = (id, key, status = 'PENDING') => ({
+    ...fakePhoto, id, key, status, originalFilename: 'IMG_1.jpg',
+    toJSON() { return { ...fakePhoto.toJSON(), id: this.id, key: this.key, status: this.status, originalFilename: this.originalFilename }; },
+});
+
+const existingAttachmentRow = (id, photoId, s3Key) => ({
+    id, photoId, s3Key, originalFilename: s3Key.split('-').pop(),
+    toJSON() { return { id: this.id, photoId: this.photoId, s3Key: this.s3Key, originalFilename: this.originalFilename }; },
+});
+
+const KEY_1 = 'uploads/collection-1/uuid-IMG_1.jpg';
+const photoPayload = (key, filename, extra = {}) => ({ collectionId: 'collection-1', key, contentType: 'image/jpeg', size: 10, filename, ...extra });
+
+test('replaying a confirm with an already registered key returns the existing photo, creates nothing and processes nothing', async () => {
+    currentCollectionStatus = 'SELECTING';
+    resetIdempotenceTracking();
+    existingPhotosByKey[KEY_1] = existingPhotoRow(42, KEY_1);
+
+    const { created, failed } = await confirmPhotosBatch({ photos: [photoPayload(KEY_1, 'IMG_1.jpg')] });
+
+    assert.equal(failed.length, 0);
+    assert.equal(created.length, 1, 'the front reads the photo from `created`, matched by key');
+    assert.equal(created[0].id, 42);
+    assert.equal(created[0].key, KEY_1);
+    assert.equal(created[0].alreadyConfirmed, true);
+    assert.equal(createdPhotosData.length, 0, 'no second row');
+    assert.equal(generationCalls.length, 0, 'no download/decode for a replay');
+    assert.equal(headCalls, 0, 'no S3 call for a replay');
+    assert.equal(watermarkLoads, 0);
+});
+
+test('a first confirm carries no alreadyConfirmed flag (additive field, replays only)', async () => {
+    currentCollectionStatus = 'SELECTING';
+    resetIdempotenceTracking();
+
+    const { created } = await confirmPhotosBatch({ photos: [photoPayload(KEY_1, 'IMG_1.jpg')] });
+
+    assert.equal(created.length, 1);
+    assert.equal('alreadyConfirmed' in created[0], false);
+});
+
+test('a partially confirmed batch replays: existing photos come back, only the missing ones are processed', async () => {
+    currentCollectionStatus = 'SELECTING';
+    resetIdempotenceTracking();
+    existingPhotosByKey['uploads/collection-1/a.jpg'] = existingPhotoRow(1, 'uploads/collection-1/a.jpg');
+    existingPhotosByKey['uploads/collection-1/c.jpg'] = existingPhotoRow(3, 'uploads/collection-1/c.jpg');
+
+    const { created, failed } = await confirmPhotosBatch({
+        photos: [
+            photoPayload('uploads/collection-1/a.jpg', 'a.jpg'),
+            photoPayload('uploads/collection-1/b.jpg', 'b.jpg'),
+            photoPayload('uploads/collection-1/c.jpg', 'c.jpg'),
+        ],
+    });
+
+    assert.equal(failed.length, 0);
+    assert.deepEqual(created.map((photo) => photo.key), ['uploads/collection-1/a.jpg', 'uploads/collection-1/b.jpg', 'uploads/collection-1/c.jpg']);
+    assert.deepEqual(created.map((photo) => Boolean(photo.alreadyConfirmed)), [true, false, true]);
+    assert.deepEqual(generationCalls.map((call) => call.key), ['uploads/collection-1/b.jpg']);
+    assert.equal(createdPhotosData.length, 1);
+});
+
+test('losing a concurrent-confirm race returns the winner\'s row instead of a duplicate', async () => {
+    currentCollectionStatus = 'SELECTING';
+    resetIdempotenceTracking();
+    racedPhotosByKey[KEY_1] = existingPhotoRow(77, KEY_1);
+
+    const { created, failed } = await confirmPhotosBatch({ photos: [photoPayload(KEY_1, 'IMG_1.jpg')] });
+
+    assert.equal(failed.length, 0);
+    assert.equal(created[0].id, 77);
+    assert.equal(created[0].alreadyConfirmed, true);
+});
+
+test('a replay completes the nested attachments that are still missing and skips the stored ones', async () => {
+    currentCollectionStatus = 'SELECTING';
+    resetIdempotenceTracking();
+    existingPhotosByKey[KEY_1] = existingPhotoRow(42, KEY_1);
+    existingAttachmentsByKey['attachments/collection-1/uuid-IMG_1.CR2'] = existingAttachmentRow(5, 42, 'attachments/collection-1/uuid-IMG_1.CR2');
+
+    const { created, failedAttachments } = await confirmPhotosBatch({
+        photos: [photoPayload(KEY_1, 'IMG_1.jpg', {
+            attachments: [
+                { key: 'attachments/collection-1/uuid-IMG_1.CR2', contentType: 'image/x-canon-cr2', size: 100, filename: 'IMG_1.CR2' },
+                { key: 'attachments/collection-1/uuid-IMG_1.xmp', contentType: 'application/xml', size: 10, filename: 'IMG_1.xmp' },
+            ],
+        })],
+    });
+
+    assert.equal(created[0].alreadyConfirmed, true);
+    assert.equal(failedAttachments.length, 0);
+    assert.deepEqual(createdAttachmentData.map((attachment) => attachment.s3Key), ['attachments/collection-1/uuid-IMG_1.xmp']);
+});
+
+test('a pure replay still succeeds once the collection no longer accepts attachments', async () => {
+    currentCollectionStatus = 'READY';
+    resetIdempotenceTracking();
+    existingPhotosByKey[KEY_1] = existingPhotoRow(42, KEY_1);
+    existingAttachmentsByKey['attachments/collection-1/uuid-IMG_1.CR2'] = existingAttachmentRow(5, 42, 'attachments/collection-1/uuid-IMG_1.CR2');
+
+    const { created, failed, failedAttachments } = await confirmPhotosBatch({
+        photos: [photoPayload(KEY_1, 'IMG_1.jpg', {
+            attachments: [{ key: 'attachments/collection-1/uuid-IMG_1.CR2', contentType: 'image/x-canon-cr2', size: 100, filename: 'IMG_1.CR2' }],
+        })],
+    });
+
+    assert.equal(failed.length, 0);
+    assert.equal(created.length, 1);
+    assert.equal(failedAttachments.length, 0);
+});
+
+test('a replay that brings a NEW attachment is still refused when the collection no longer accepts attachments', async () => {
+    currentCollectionStatus = 'READY';
+    resetIdempotenceTracking();
+    existingPhotosByKey[KEY_1] = existingPhotoRow(42, KEY_1);
+
+    const { created, failedAttachments } = await confirmPhotosBatch({
+        photos: [photoPayload(KEY_1, 'IMG_1.jpg', {
+            attachments: [{ key: 'attachments/collection-1/uuid-IMG_1.xmp', contentType: 'application/xml', size: 10, filename: 'IMG_1.xmp' }],
+        })],
+    });
+
+    assert.equal(created.length, 1);
+    assert.equal(failedAttachments.length, 1);
+    assert.equal(createdAttachmentData.length, 0);
+});
+
+test('re-confirming an attachment of an existing photo returns the stored row, flagged, without creating another', async () => {
+    currentCollectionStatus = 'SELECTING';
+    resetIdempotenceTracking();
+    existingAttachmentsByKey['attachments/collection-1/uuid-IMG_1.CR2'] = existingAttachmentRow(5, 'photo-1', 'attachments/collection-1/uuid-IMG_1.CR2');
+
+    const { createdAttachments, failedAttachments } = await confirmPhotosBatch({
+        photos: [],
+        attachmentsToExistingPhotos: [{ photoId: 'photo-1', attachments: [{ key: 'attachments/collection-1/uuid-IMG_1.CR2', contentType: 'image/x-canon-cr2', size: 100, filename: 'IMG_1.CR2' }] }],
+    });
+
+    assert.equal(failedAttachments.length, 0);
+    assert.equal(createdAttachments.length, 1);
+    assert.equal(createdAttachments[0].id, 5);
+    assert.equal(createdAttachments[0].alreadyConfirmed, true);
+    assert.equal(createdAttachmentData.length, 0);
+});
+
+test('an attachment key already attached to ANOTHER photo is reported in failedAttachments (409 semantics)', async () => {
+    currentCollectionStatus = 'SELECTING';
+    resetIdempotenceTracking();
+    existingAttachmentsByKey['attachments/collection-1/uuid-IMG_1.CR2'] = existingAttachmentRow(5, 'some-other-photo', 'attachments/collection-1/uuid-IMG_1.CR2');
+
+    const { createdAttachments, failedAttachments } = await confirmPhotosBatch({
+        photos: [],
+        attachmentsToExistingPhotos: [{ photoId: 'photo-1', attachments: [{ key: 'attachments/collection-1/uuid-IMG_1.CR2', contentType: 'image/x-canon-cr2', size: 100, filename: 'IMG_1.CR2' }] }],
+    });
+
+    assert.equal(createdAttachments.length, 0);
+    assert.equal(failedAttachments.length, 1);
+    assert.match(failedAttachments[0].error, /already attached to another photo/);
+});
+
+test('losing a concurrent-confirm race on an attachment returns the winner\'s row', async () => {
+    currentCollectionStatus = 'SELECTING';
+    resetIdempotenceTracking();
+    racedAttachmentsByKey['attachments/collection-1/uuid-IMG_1.CR2'] = existingAttachmentRow(9, 'photo-1', 'attachments/collection-1/uuid-IMG_1.CR2');
+
+    const { createdAttachments } = await confirmPhotosBatch({
+        photos: [],
+        attachmentsToExistingPhotos: [{ photoId: 'photo-1', attachments: [{ key: 'attachments/collection-1/uuid-IMG_1.CR2', contentType: 'image/x-canon-cr2', size: 100, filename: 'IMG_1.CR2' }] }],
+    });
+
+    assert.equal(createdAttachments[0].id, 9);
+    assert.equal(createdAttachments[0].alreadyConfirmed, true);
 });
