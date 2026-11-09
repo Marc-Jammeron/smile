@@ -1,4 +1,5 @@
 import logger from '../logger.js';
+import { getMemorySnapshot } from '../utils/memory.js';
 import { getAllPhotosByCollectionId, getPhotoById, createPhotosBatch, confirmPhotosBatch, updatePhoto, updatePhotoSelectionStatus, softDeletePhoto, deleteDeliveredPhoto } from '../services/photo.service.js';
 
 const log = logger.child('photo.controller');
@@ -47,7 +48,8 @@ export const confirmNewPhotosBatch = async (req, res) => {
         log.info('Confirming uploaded photos', {
             photoCount: photos?.length,
             attachmentsToExistingPhotosCount: attachmentsToExistingPhotos?.length,
-            targetStatus
+            targetStatus,
+            ...getMemorySnapshot()
         });
         const result = await confirmPhotosBatch({ photos, attachmentsToExistingPhotos, targetStatus });
         const summary = {
@@ -57,9 +59,9 @@ export const confirmNewPhotosBatch = async (req, res) => {
             failedAttachments: result.failedAttachments.length
         };
         if (summary.failed > 0 || summary.failedAttachments > 0) {
-            log.warn('Photo batch confirmed with failures', { ...summary, failures: result.failed, failedAttachments: result.failedAttachments });
+            log.warn('Photo batch confirmed with failures', { ...summary, failures: result.failed, failedAttachments: result.failedAttachments, ...getMemorySnapshot() });
         } else {
-            log.info('Photo batch confirmed', summary);
+            log.info('Photo batch confirmed', { ...summary, ...getMemorySnapshot() });
         }
         res.status(201).json(result);
     } catch (error) {

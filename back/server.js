@@ -1,5 +1,6 @@
 import app from './app.js';
 import logger from './src/logger.js';
+import { getMemorySnapshot, getRuntimeLimits, startMemoryHeartbeat } from './src/utils/memory.js';
 
 const log = logger.child('server');
 
@@ -9,14 +10,25 @@ app.listen(port, () => {
     log.info('Server listening', {
         port,
         env: process.env.NODE_ENV || 'development',
-        nodeVersion: process.version,
-        logLevel: logger.getLevel()
+        logLevel: logger.getLevel(),
+        ...getRuntimeLimits(),
+        ...getMemorySnapshot()
     });
 });
 
+startMemoryHeartbeat();
+
 // Sans ces handlers, un crash n'apparaît que sur stderr brut, hors du format de log.
 process.on('uncaughtException', (error, origin) => {
-    log.error('Uncaught exception, shutting down', error, { origin });
+    log.error('Uncaught exception, shutting down', error, { origin, ...getMemorySnapshot() });
+    process.exit(1);
+});
+
+// Node 22 turns an unhandled rejection into an uncaughtException anyway; handling it
+// explicitly keeps the failure readable and adds the memory state at the time of the crash.
+process.on('unhandledRejection', (reason) => {
+    const error = reason instanceof Error ? reason : new Error(`Unhandled rejection: ${String(reason)}`);
+    log.error('Unhandled promise rejection, shutting down', error, { origin: 'unhandledRejection', ...getMemorySnapshot() });
     process.exit(1);
 });
 

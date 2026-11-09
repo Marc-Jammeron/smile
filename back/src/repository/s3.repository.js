@@ -1,7 +1,7 @@
 import { S3Client, PutObjectCommand, GetObjectCommand, HeadObjectCommand, DeleteObjectCommand, DeleteObjectsCommand, ListObjectsV2Command } from "@aws-sdk/client-s3";
 import { Buffer } from "node:buffer";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
-import { v4 as uuid } from "uuid";
+import { randomUUID } from "node:crypto";
 import logger from "../logger.js";
 
 const log = logger.child("s3");
@@ -43,7 +43,7 @@ const getSignedPutUrl = (key, contentType) => {
 };
 
 const getSignedUploadUrl = async (collectionId, filename, contentType) => {
-    const key = `uploads/${collectionId}/${uuid()}-${filename}`;
+    const key = `uploads/${collectionId}/${randomUUID()}-${filename}`;
     const url = await getSignedPutUrl(key, contentType);
     return { url, key };
 };
@@ -51,13 +51,13 @@ const getSignedUploadUrl = async (collectionId, filename, contentType) => {
 // Distinct path prefix from getSignedUploadUrl (`uploads/`) so attachment keys
 // can never collide with a Photo's own key.
 const getSignedAttachmentUploadUrl = async (collectionId, filename, contentType) => {
-    const key = `attachments/${collectionId}/${uuid()}-${filename}`;
+    const key = `attachments/${collectionId}/${randomUUID()}-${filename}`;
     const url = await getSignedPutUrl(key, contentType);
     return { url, key };
 };
 
 const getSignedBrandingUploadUrl = async (kind, contentType) => {
-    const key = `branding/${kind}/raw/${uuid()}`;
+    const key = `branding/${kind}/raw/${randomUUID()}`;
     const url = await getSignedPutUrl(key, contentType);
     return { url, key };
 };

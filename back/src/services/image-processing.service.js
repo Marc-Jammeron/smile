@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import s3Repository from "../repository/s3.repository.js";
 import { validateWatermarkValues, loadSavedWatermarkValues, buildWatermarkConfig } from "./settings.service.js";
+import { getMemorySnapshot } from "../utils/memory.js";
 import logger from "../logger.js";
 
 const log = logger.child("image-processing");
@@ -142,7 +143,8 @@ export const generateDerivedImages = async (key, { watermark = true } = {}) => {
     log.info("Derived images generated", {
         key, thumbnailKey, previewKey, watermark,
         originalBytes: original.length, previewBytes: previewBuffer.length, thumbnailBytes: thumbnailBuffer.length,
-        durationMs: Math.round(performance.now() - startedAt)
+        durationMs: Math.round(performance.now() - startedAt),
+        ...getMemorySnapshot()
     });
     return { thumbnailKey, previewKey };
 };
