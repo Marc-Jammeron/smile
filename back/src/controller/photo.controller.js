@@ -1,5 +1,6 @@
 import logger from '../logger.js';
 import { getMemorySnapshot } from '../utils/memory.js';
+import { abortSignalForResponse } from '../utils/request-abort.js';
 import { getAllPhotosByCollectionId, getPhotoById, createPhotosBatch, confirmPhotosBatch, updatePhoto, updatePhotoSelectionStatus, softDeletePhoto, deleteDeliveredPhoto } from '../services/photo.service.js';
 
 const log = logger.child('photo.controller');
@@ -51,7 +52,7 @@ export const confirmNewPhotosBatch = async (req, res) => {
             targetStatus,
             ...getMemorySnapshot()
         });
-        const result = await confirmPhotosBatch({ photos, attachmentsToExistingPhotos, targetStatus });
+        const result = await confirmPhotosBatch({ photos, attachmentsToExistingPhotos, targetStatus, signal: abortSignalForResponse(res) });
         const summary = {
             created: result.created.length,
             failed: result.failed.length,

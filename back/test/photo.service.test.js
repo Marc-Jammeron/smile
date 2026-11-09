@@ -41,6 +41,12 @@ let deletedS3Keys = [];
 let lastGenerateDerivedImagesCall = null;
 let currentAttachments = [];
 let signedDownloads = [];
+let activeGenerations = 0;
+let maxActiveGenerations = 0;
+let generationCalls = [];
+let watermarkLoads = 0;
+let watermarkLoadError = null;
+const SHARED_WATERMARK = { image: 'watermark-image', position: 'southeast', opacity: 0.5, size: null, margin: 24 };
 let createdAttachmentData = [];
 
 mock.module('../src/repository/db.repository.js', {
@@ -100,8 +106,28 @@ mock.module('../src/services/image-processing.service.js', {
     namedExports: {
         generateDerivedImages: async (key, options) => {
             lastGenerateDerivedImagesCall = { key, options };
-            await new Promise((resolve) => setTimeout(resolve, processingDelayByKey[key] ?? 0));
+            generationCalls.push({ key, options });
+            activeGenerations += 1;
+            maxActiveGenerations = Math.max(maxActiveGenerations, activeGenerations);
+            try {
+                await new Promise((resolve) => setTimeout(resolve, processingDelayByKey[key] ?? 0));
+            } finally {
+                activeGenerations -= 1;
+            }
             return { thumbnailKey: THUMBNAIL_KEY, previewKey: PREVIEW_KEY };
+        },
+    },
+});
+
+mock.module('../src/services/settings.service.js', {
+    namedExports: {
+        loadWatermarkConfig: async () => {
+            watermarkLoads += 1;
+            await new Promise((resolve) => setTimeout(resolve, 5));
+            if (watermarkLoadError) {
+                throw watermarkLoadError;
+            }
+            return SHARED_WATERMARK;
         },
     },
 });
@@ -521,4 +547,154 @@ test('client DTO only presigns preview and thumbnail, both for 3600 s, and never
     assert.ok(signedDownloads.length > 0);
     assert.ok(signedDownloads.every((signed) => signed.expiresIn === 3600), JSON.stringify(signedDownloads));
     assert.ok(signedDownloads.every((signed) => signed.key !== ORIGINAL_KEY));
+});
+
+
+// --- Step C3: bounded image processing, watermark resolved once per request, aborted requests ---
+
+const resetGenerationTracking = () => {
+    activeGenerations = 0;
+    maxActiveGenerations = 0;
+    generationCalls = [];
+    watermarkLoads = 0;
+    watermarkLoadError = null;
+    createdPhotosData = [];
+    currentMaxPosition = null;
+    processingDelayByKey = {};
+};
+
+const slowBatch = (count, prefix = 'slow') => {
+    const photos = Array.from({ length: count }, (_, index) => ({
+        collectionId: 'collection-1', key: `uploads/collection-1/${prefix}-${index}.jpg`, contentType: 'image/jpeg', size: 10, filename: `${prefix}_${index}.jpg`,
+    }));
+    for (const photo of photos) {
+        processingDelayByKey[photo.key] = 15;
+    }
+    return photos;
+};
+
+test('confirmPhotosBatch never processes more than 2 photos at once (default IMAGE_PROCESSING_CONCURRENCY)', async () => {
+    currentCollectionStatus = 'SELECTING';
+    resetGenerationTracking();
+
+    const { created, failed } = await confirmPhotosBatch({ photos: slowBatch(8) });
+
+    assert.equal(created.length, 8);
+    assert.equal(failed.length, 0);
+    assert.equal(maxActiveGenerations, 2);
+});
+
+test('the bound is process-wide: two overlapping requests still share the same 2 slots', async () => {
+    currentCollectionStatus = 'SELECTING';
+    resetGenerationTracking();
+
+    const [first, second] = await Promise.all([
+        confirmPhotosBatch({ photos: slowBatch(5, 'a') }),
+        confirmPhotosBatch({ photos: slowBatch(5, 'b') }),
+    ]);
+
+    assert.equal(first.created.length + second.created.length, 10);
+    assert.equal(maxActiveGenerations, 2);
+});
+
+test('confirmPhotosBatch keeps the result shape and the input order of positions under the bound', async () => {
+    currentCollectionStatus = 'SELECTING';
+    resetGenerationTracking();
+    const photos = slowBatch(4);
+    photos.push({ collectionId: 'collection-1', key: 'uploads/collection-1/bad.CR2', contentType: 'image/x-canon-cr2', size: 10, filename: 'bad.CR2' });
+
+    const result = await confirmPhotosBatch({ photos });
+
+    assert.deepEqual(Object.keys(result).sort(), ['created', 'createdAttachments', 'failed', 'failedAttachments']);
+    assert.deepEqual(result.failed.map((failure) => failure.key), ['uploads/collection-1/bad.CR2']);
+    assert.deepEqual(result.created.map((photo) => photo.originalFilename).sort(), ['slow_0.jpg', 'slow_1.jpg', 'slow_2.jpg', 'slow_3.jpg']);
+    const positionByName = Object.fromEntries(createdPhotosData.map((photo) => [photo.originalFilename, photo.position]));
+    assert.deepEqual(positionByName, { 'slow_0.jpg': 0, 'slow_1.jpg': 1, 'slow_2.jpg': 2, 'slow_3.jpg': 3 });
+});
+
+test('the watermark config is loaded once per request and shared with every photo', async () => {
+    currentCollectionStatus = 'SELECTING';
+    resetGenerationTracking();
+
+    await confirmPhotosBatch({ photos: slowBatch(5) });
+
+    assert.equal(watermarkLoads, 1);
+    assert.equal(generationCalls.length, 5);
+    assert.ok(generationCalls.every(({ options }) => options.watermark === true && options.watermarkConfig === SHARED_WATERMARK));
+});
+
+test('each request reloads the watermark config (settings changes are picked up, no durable cache)', async () => {
+    currentCollectionStatus = 'SELECTING';
+    resetGenerationTracking();
+
+    await confirmPhotosBatch({ photos: slowBatch(2, 'one') });
+    await confirmPhotosBatch({ photos: slowBatch(2, 'two') });
+
+    assert.equal(watermarkLoads, 2);
+});
+
+test('DELIVERED photos never load the watermark config', async () => {
+    currentCollectionStatus = 'EDITING';
+    resetGenerationTracking();
+
+    await confirmPhotosBatch({ photos: slowBatch(3), targetStatus: 'DELIVERED' });
+
+    assert.equal(watermarkLoads, 0);
+    assert.ok(generationCalls.every(({ options }) => options.watermark === false && options.watermarkConfig === undefined));
+});
+
+test('a batch whose photos are all refused never loads the watermark config', async () => {
+    currentCollectionStatus = 'SELECTING';
+    resetGenerationTracking();
+
+    const { failed } = await confirmPhotosBatch({
+        photos: [{ collectionId: 'collection-1', key: 'uploads/collection-1/a.CR2', contentType: 'image/x-canon-cr2', size: 1, filename: 'a.CR2' }],
+    });
+
+    assert.equal(failed.length, 1);
+    assert.equal(watermarkLoads, 0);
+});
+
+test('a watermark config failure is reported per photo in `failed` (same error for all), one load attempt', async () => {
+    currentCollectionStatus = 'SELECTING';
+    resetGenerationTracking();
+    watermarkLoadError = new Error('Watermark image missing');
+
+    const { created, failed } = await confirmPhotosBatch({ photos: slowBatch(3) });
+
+    assert.equal(created.length, 0);
+    assert.equal(failed.length, 3);
+    assert.ok(failed.every((failure) => failure.error === 'Watermark image missing'));
+    assert.equal(watermarkLoads, 1);
+    assert.equal(generationCalls.length, 0);
+});
+
+test('photos of an already aborted request are skipped without any image processing', async () => {
+    currentCollectionStatus = 'SELECTING';
+    resetGenerationTracking();
+    const controller = new AbortController();
+    controller.abort();
+
+    const { created, failed } = await confirmPhotosBatch({ photos: slowBatch(3), signal: controller.signal });
+
+    assert.equal(created.length, 0);
+    assert.equal(failed.length, 3);
+    assert.equal(generationCalls.length, 0);
+    assert.equal(watermarkLoads, 0);
+});
+
+test('photos still queued when the client leaves are skipped, those already processing finish', async () => {
+    currentCollectionStatus = 'SELECTING';
+    resetGenerationTracking();
+    const controller = new AbortController();
+    const photos = slowBatch(6);
+
+    const pending = confirmPhotosBatch({ photos, signal: controller.signal });
+    await new Promise((resolve) => setTimeout(resolve, 8)); // the first 2 are running, 4 are queued
+    controller.abort();
+    const { created, failed } = await pending;
+
+    assert.equal(created.length, 2);
+    assert.equal(failed.length, 4);
+    assert.equal(generationCalls.length, 2);
 });

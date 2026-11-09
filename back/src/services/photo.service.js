@@ -1,12 +1,19 @@
 import db from "../repository/db.repository.js";
 import s3Repository from "../repository/s3.repository.js";
 import { generateDerivedImages } from "./image-processing.service.js";
+import { loadWatermarkConfig } from "./settings.service.js";
+import { createLimiter, once } from "../utils/limiter.js";
 import { isMainPhotoFilename, isBlacklistedFilename } from "./filename.util.js";
 import { LIMITS } from "../config/limits.js";
 import { SIGNED_URL_TTL_SECONDS } from "../config/signed-urls.js";
 import logger from "../logger.js";
 
 const log = logger.child("photo.service");
+
+// Process-wide bound on concurrent image processing (decode + resize + encode): it holds
+// across requests, so a client retrying after a timeout cannot pile work on top of the
+// request it abandoned.
+const imageProcessingLimit = createLimiter(LIMITS.imageProcessingConcurrency);
 
 // Attachments (RAW/XMP) are opaque past this gate: once accepted, they're never
 // re-classified by format anywhere else in the codebase (see spec's "no re-render"
@@ -244,7 +251,7 @@ const confirmAttachmentForExistingPhoto = async (attachmentData, photoId) => {
 
 // Extension is checked here (not just at grouping time on the client) so a CR2
 // submitted as a main photo item can never reach generateDerivedImages/sharp.
-const confirmPhoto = async (photoData, targetStatus, position) => {
+const confirmPhoto = async (photoData, targetStatus, position, { getWatermarkConfig, signal } = {}) => {
     try {
         const { collectionId, key, contentType, size, description, filename, attachments = [] } = photoData;
 
@@ -271,9 +278,20 @@ const confirmPhoto = async (photoData, targetStatus, position) => {
             await assertCollectionAcceptsAttachments(collectionId);
         }
 
-        const { thumbnailKey, previewKey } = await generateDerivedImages(key, { watermark: targetStatus !== 'DELIVERED' });
+        const watermarked = targetStatus !== 'DELIVERED';
+        const queuedAt = performance.now();
+        const { thumbnailKey, previewKey } = await imageProcessingLimit(async () => {
+            // Checked once the slot is ours: a photo that waited while the client left is skipped.
+            if (signal?.aborted) {
+                log.info("Photo skipped: the request was aborted by the client", { collectionId, key });
+                throw Object.assign(new Error('Request aborted by the client'), { status: 499 });
+            }
+            log.debug("Image processing slot acquired", { key, waitMs: Math.round(performance.now() - queuedAt), ...imageProcessingLimit.stats() });
+            const watermarkConfig = watermarked ? await getWatermarkConfig() : undefined;
+            return generateDerivedImages(key, { watermark: watermarked, watermarkConfig });
+        });
 
-        log.debug("Derived images generated", { key, thumbnailKey, previewKey, watermarked: targetStatus !== 'DELIVERED' });
+        log.debug("Derived images generated", { key, thumbnailKey, previewKey, watermarked });
 
         const newPhoto = await db.Photo.create({ collectionId, key, thumbnailKey, previewKey, contentType, size, description, originalFilename: filename, status: targetStatus, position });
 
@@ -302,7 +320,7 @@ const getNextPosition = async (collectionId) => {
     return Number.isFinite(maxPosition) ? maxPosition + 1 : 0;
 };
 
-export const confirmPhotosBatch = async ({ photos = [], attachmentsToExistingPhotos = [], targetStatus = 'PENDING' } = {}) => {
+export const confirmPhotosBatch = async ({ photos = [], attachmentsToExistingPhotos = [], targetStatus = 'PENDING', signal } = {}) => {
     assertConfirmRequest({ photos, attachmentsToExistingPhotos });
 
     if (targetStatus === 'DELIVERED' && photos.length > 0) {
@@ -316,7 +334,13 @@ export const confirmPhotosBatch = async ({ photos = [], attachmentsToExistingPho
     const basePosition = photos.length > 0 ? await getNextPosition(photos[0].collectionId) : 0;
     log.debug("Confirming photo batch", { photoCount: photos.length, attachmentsToExistingPhotos: attachmentsToExistingPhotos.length, targetStatus, basePosition });
 
-    const photoResults = await Promise.allSettled(photos.map((photoData, index) => confirmPhoto(photoData, targetStatus, basePosition + index)));
+    // Resolved at most once per request (lazily, so a batch whose photos are all refused
+    // never pays for it, and a DELIVERED batch never calls it). A failure is shared: every
+    // watermarked photo of the batch reports the same error in `failed`.
+    const getWatermarkConfig = once(loadWatermarkConfig);
+    const photoResults = await Promise.allSettled(
+        photos.map((photoData, index) => confirmPhoto(photoData, targetStatus, basePosition + index, { getWatermarkConfig, signal }))
+    );
 
     const created = [];
     const failed = [];

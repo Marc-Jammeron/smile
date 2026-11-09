@@ -123,11 +123,15 @@ export const generateWatermarkSample = async (values) => {
     return buildPreview(await loadTestPhoto(), { watermark: config });
 };
 
-export const generateDerivedImages = async (key, { watermark = true } = {}) => {
+// `watermarkConfig` lets a caller that processes several photos resolve the watermark once
+// and share it; without it the saved settings are loaded here, as before.
+export const generateDerivedImages = async (key, { watermark = true, watermarkConfig: sharedWatermarkConfig } = {}) => {
     const startedAt = performance.now();
     log.debug("Generating derived images", { key, watermark });
     const original = await s3Repository.getObject(key);
-    const watermarkConfig = watermark ? await buildWatermarkConfig(await loadSavedWatermarkValues()) : false;
+    const watermarkConfig = watermark
+        ? (sharedWatermarkConfig ?? await buildWatermarkConfig(await loadSavedWatermarkValues()))
+        : false;
 
     const previewBuffer = await buildPreview(original, { watermark: watermarkConfig });
     const thumbnailBuffer = await buildThumbnail(previewBuffer);
