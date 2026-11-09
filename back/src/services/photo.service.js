@@ -96,14 +96,36 @@ const assertConfirmRequest = ({ photos, attachmentsToExistingPhotos }) => {
 
 const PHOTO_ORDER = [['position', 'ASC'], ['id', 'ASC']];
 
-const toPhotoDTO = async (photo) => {
+// `attachmentFilenames` is the admin-only addition: when given (an array) the DTO carries
+// attachmentCount + attachmentFilenames, so the upload UI can tell what is already attached.
+// It defaults to undefined => the fields are absent, which is what every client-facing
+// path relies on (getDeliveredPhotosByCollectionId feeds the client gallery).
+const toPhotoDTO = async (photo, attachmentFilenames) => {
     const { key, thumbnailKey, previewKey } = photo;
     const [url, thumbnailUrl, previewUrl] = await Promise.all([
         s3Repository.getSignedDownloadUrl(key, { expiresIn: SIGNED_URL_TTL_SECONDS.original }),
         thumbnailKey ? s3Repository.getSignedDownloadUrl(thumbnailKey, { expiresIn: SIGNED_URL_TTL_SECONDS.preview }) : Promise.resolve(null),
         previewKey ? s3Repository.getSignedDownloadUrl(previewKey, { expiresIn: SIGNED_URL_TTL_SECONDS.preview }) : Promise.resolve(null)
     ]);
-    return { ...photo.toJSON(), url, thumbnailUrl, previewUrl };
+    const dto = { ...photo.toJSON(), url, thumbnailUrl, previewUrl };
+    if (Array.isArray(attachmentFilenames)) {
+        dto.attachmentCount = attachmentFilenames.length;
+        dto.attachmentFilenames = attachmentFilenames;
+    }
+    return dto;
+};
+
+// One query for the whole list (never one per photo): filenames grouped by photo id.
+const loadAttachmentFilenamesByPhotoId = async (photoIds) => {
+    const attachments = await getAttachmentsForPhotos(photoIds, { attributes: ['photoId', 'originalFilename'], order: [['id', 'ASC']] });
+    const byPhotoId = new Map();
+    for (const { photoId, originalFilename } of attachments) {
+        if (!byPhotoId.has(photoId)) {
+            byPhotoId.set(photoId, []);
+        }
+        byPhotoId.get(photoId).push(originalFilename);
+    }
+    return byPhotoId;
 };
 
 // Client-facing DTO: unlike toPhotoDTO, `url` is presigned on previewKey (never key),
@@ -131,7 +153,8 @@ export const getAllPhotosByCollectionId = async (collectionId) => {
             order: PHOTO_ORDER,
         });
         log.debug("Photos loaded", { collectionId, count: photos.length });
-        return Promise.all(photos.map(toPhotoDTO));
+        const filenamesByPhotoId = await loadAttachmentFilenamesByPhotoId(photos.map((photo) => photo.id));
+        return Promise.all(photos.map((photo) => toPhotoDTO(photo, filenamesByPhotoId.get(photo.id) ?? [])));
     } catch (error) {
         log.failure("Error fetching photos", error, { collectionId });
         throw error;
@@ -157,7 +180,11 @@ export const getAllClientPhotosByCollectionId = async (collectionId) => {
 export const getPhotoById = async (id) => {
     try {
         const photo = await db.Photo.findByPk(id);
-        return photo ? toPhotoDTO(photo) : null;
+        if (!photo) {
+            return null;
+        }
+        const filenamesByPhotoId = await loadAttachmentFilenamesByPhotoId([photo.id]);
+        return toPhotoDTO(photo, filenamesByPhotoId.get(photo.id) ?? []);
     } catch (error) {
         log.failure("Error fetching photo", error, { photoId: id });
         throw error;
@@ -315,7 +342,10 @@ const confirmPhoto = async (photoData, targetStatus, position, { getWatermarkCon
         }
         log.info("Photo created", { photoId: newPhoto.id, collectionId, filename, status: targetStatus, position, attachmentCount: attachments.length - failedAttachments.length });
 
-        const photoDTO = await toPhotoDTO(newPhoto);
+        const savedAttachmentFilenames = attachmentResults
+            .filter((result) => result.status === 'fulfilled')
+            .map((result) => result.value.originalFilename);
+        const photoDTO = await toPhotoDTO(newPhoto, savedAttachmentFilenames);
         return { ...photoDTO, failedAttachments };
     } catch (error) {
         log.failure("Error confirming photo", error, { key: photoData?.key, collectionId: photoData?.collectionId });

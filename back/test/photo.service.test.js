@@ -41,6 +41,8 @@ let deletedS3Keys = [];
 let lastGenerateDerivedImagesCall = null;
 let currentAttachments = [];
 let signedDownloads = [];
+let attachmentFindAllCalls = [];
+let currentFindAllPhotos = null;
 let headResult = { size: 1234, contentType: 'image/jpeg' };
 let activeGenerations = 0;
 let maxActiveGenerations = 0;
@@ -55,7 +57,7 @@ mock.module('../src/repository/db.repository.js', {
         Photo: {
             findAll: async (options) => {
                 lastFindAllOptions = options;
-                return [fakePhoto];
+                return currentFindAllPhotos ?? [fakePhoto];
             },
             max: async (column, options) => {
                 lastMaxArgs = { column, options };
@@ -76,7 +78,10 @@ mock.module('../src/repository/db.repository.js', {
             findByPk: async () => ({ status: currentCollectionStatus }),
         },
         PhotoAttachment: {
-            findAll: async () => currentAttachments,
+            findAll: async (options) => {
+                attachmentFindAllCalls.push(options);
+                return currentAttachments;
+            },
             create: async (data) => {
                 createdAttachmentData.push(data);
                 return { ...data, id: `attachment-${createdAttachmentData.length}`, toJSON() { return { ...data, id: `attachment-${createdAttachmentData.length}` }; } };
@@ -134,7 +139,7 @@ mock.module('../src/services/settings.service.js', {
     },
 });
 
-const { createPhotosBatch, getAllClientPhotosByCollectionId, getAllPhotosByCollectionId, getDeliveredPhotosByCollectionId, getSelectedPhotosForCollection, getDeliveredPhotosForZip, confirmPhotosBatch, getPhotoDownloadFilename, deleteDeliveredPhoto } = await import('../src/services/photo.service.js');
+const { getPhotoById, createPhotosBatch, getAllClientPhotosByCollectionId, getAllPhotosByCollectionId, getDeliveredPhotosByCollectionId, getSelectedPhotosForCollection, getDeliveredPhotosForZip, confirmPhotosBatch, getPhotoDownloadFilename, deleteDeliveredPhoto } = await import('../src/services/photo.service.js');
 
 test('getAllClientPhotosByCollectionId (client gallery path) never presigns the original S3 key', async () => {
     const [photo] = await getAllClientPhotosByCollectionId('collection-1');
@@ -751,4 +756,117 @@ test('confirmPhotosBatch reports a missing original (HEAD 404) in failed, as bef
     assert.equal(created.length, 0);
     assert.match(failed[0].error, /not found in storage/);
     assert.equal(generationCalls.length, 0);
+});
+
+
+// --- Step C5: attachmentCount / attachmentFilenames (admin DTO only) ---
+
+const makePhoto = (id) => ({ ...fakePhoto, id, key: `uploads/collection-1/p${id}.jpg`, toJSON() { return { ...fakePhoto.toJSON(), id, key: this.key }; } });
+
+const resetAttachmentTracking = () => {
+    attachmentFindAllCalls = [];
+    currentFindAllPhotos = null;
+    currentAttachments = [];
+};
+
+test('admin list carries attachmentCount and attachmentFilenames per photo, from a single attachments query', async () => {
+    resetAttachmentTracking();
+    currentFindAllPhotos = [makePhoto(1), makePhoto(2), makePhoto(3)];
+    currentAttachments = [
+        { photoId: 1, originalFilename: 'IMG_1.CR2' },
+        { photoId: 1, originalFilename: 'IMG_1.xmp' },
+        { photoId: 3, originalFilename: 'IMG_3.CR2' },
+    ];
+
+    const photos = await getAllPhotosByCollectionId('collection-1');
+    currentFindAllPhotos = null;
+
+    assert.deepEqual(photos.map((photo) => [photo.id, photo.attachmentCount, photo.attachmentFilenames]), [
+        [1, 2, ['IMG_1.CR2', 'IMG_1.xmp']],
+        [2, 0, []],
+        [3, 1, ['IMG_3.CR2']],
+    ]);
+    assert.equal(attachmentFindAllCalls.length, 1, 'no N+1: one attachments query for the whole list');
+    assert.deepEqual(attachmentFindAllCalls[0].where, { photoId: [1, 2, 3] });
+    assert.deepEqual(attachmentFindAllCalls[0].attributes, ['photoId', 'originalFilename']);
+});
+
+test('admin list of an empty collection runs no attachments query', async () => {
+    resetAttachmentTracking();
+    currentFindAllPhotos = [];
+
+    const photos = await getAllPhotosByCollectionId('collection-1');
+    currentFindAllPhotos = null;
+
+    assert.deepEqual(photos, []);
+    assert.equal(attachmentFindAllCalls.length, 0);
+});
+
+test('admin list keeps every existing field (additive change only)', async () => {
+    resetAttachmentTracking();
+    const [photo] = await getAllPhotosByCollectionId('collection-1');
+    for (const field of ['id', 'collectionId', 'key', 'previewKey', 'thumbnailKey', 'status', 'url', 'thumbnailUrl', 'previewUrl']) {
+        assert.ok(field in photo, field);
+    }
+});
+
+test('client gallery DTO never carries attachment information and runs no attachments query', async () => {
+    resetAttachmentTracking();
+    currentAttachments = [{ photoId: 'photo-1', originalFilename: 'IMG_1.CR2' }];
+
+    const photos = await getAllClientPhotosByCollectionId('collection-1');
+
+    assert.ok(photos.length > 0);
+    for (const photo of photos) {
+        assert.equal('attachmentCount' in photo, false);
+        assert.equal('attachmentFilenames' in photo, false);
+        assert.ok(!JSON.stringify(photo).includes('IMG_1.CR2'));
+    }
+    assert.equal(attachmentFindAllCalls.length, 0);
+});
+
+test('delivered gallery DTO (served to the client once READY) never carries attachment information either', async () => {
+    resetAttachmentTracking();
+    currentAttachments = [{ photoId: 'photo-1', originalFilename: 'IMG_1.CR2' }];
+
+    const photos = await getDeliveredPhotosByCollectionId('collection-1');
+
+    assert.ok(photos.length > 0);
+    for (const photo of photos) {
+        assert.equal('attachmentCount' in photo, false);
+        assert.equal('attachmentFilenames' in photo, false);
+    }
+    assert.equal(attachmentFindAllCalls.length, 0);
+});
+
+test('getPhotoById (admin) carries the attachment info', async () => {
+    resetAttachmentTracking();
+    currentFindByPkPhoto = makePhoto(7);
+    currentAttachments = [{ photoId: 7, originalFilename: 'IMG_7.CR2' }];
+
+    const photo = await getPhotoById(7);
+    currentFindByPkPhoto = fakePhoto;
+
+    assert.equal(photo.attachmentCount, 1);
+    assert.deepEqual(photo.attachmentFilenames, ['IMG_7.CR2']);
+});
+
+test('confirm returns attachmentCount / attachmentFilenames for the attachments actually saved', async () => {
+    currentCollectionStatus = 'SELECTING';
+    resetGenerationTracking();
+    createdAttachmentData = [];
+
+    const { created, failedAttachments } = await confirmPhotosBatch({
+        photos: [{
+            collectionId: 'collection-1', key: ORIGINAL_KEY, contentType: 'image/jpeg', size: 10, filename: 'IMG_0099.jpg',
+            attachments: [
+                { key: 'attachments/collection-1/uuid-IMG_0099.CR2', contentType: 'image/x-canon-cr2', size: 100, filename: 'IMG_0099.CR2' },
+                { key: 'attachments/collection-1/uuid-.DS_Store', contentType: '', size: 100, filename: '.DS_Store' },
+            ],
+        }],
+    });
+
+    assert.equal(failedAttachments.length, 1);
+    assert.equal(created[0].attachmentCount, 1);
+    assert.deepEqual(created[0].attachmentFilenames, ['IMG_0099.CR2']);
 });
