@@ -19,4 +19,6 @@ USER app
 
 EXPOSE 3000
 
-CMD ["npm", "start"]
+# node directly (not `npm start`): no resident npm parent in the container memory, and
+# SIGTERM reaches the app. Same flags as the "start" script.
+CMD ["node", "-r", "dotenv/config", "server.js"]

@@ -1,4 +1,6 @@
 import logger from '../logger.js';
+import { getMemorySnapshot } from '../utils/memory.js';
+import { abortSignalForResponse } from '../utils/request-abort.js';
 import { getAllPhotosByCollectionId, getPhotoById, createPhotosBatch, confirmPhotosBatch, updatePhoto, updatePhotoSelectionStatus, softDeletePhoto, deleteDeliveredPhoto } from '../services/photo.service.js';
 
 const log = logger.child('photo.controller');
@@ -34,7 +36,7 @@ export const createNewPhotosBatch = async (req, res) => {
     try {
         const { collectionId, files, targetStatus } = req.body ?? {};
         log.info('Generating upload urls', { collectionId, fileCount: files?.length, targetStatus });
-        const urls = await createPhotosBatch(req.body);
+        const urls = await createPhotosBatch(req.body ?? {});
         res.status(200).json(urls);
     } catch (error) {
         res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed to generate upload urls' });
@@ -43,23 +45,26 @@ export const createNewPhotosBatch = async (req, res) => {
 
 export const confirmNewPhotosBatch = async (req, res) => {
     try {
-        const { photos, attachmentsToExistingPhotos, targetStatus } = req.body;
+        const { photos, attachmentsToExistingPhotos, targetStatus } = req.body ?? {};
         log.info('Confirming uploaded photos', {
             photoCount: photos?.length,
             attachmentsToExistingPhotosCount: attachmentsToExistingPhotos?.length,
-            targetStatus
+            targetStatus,
+            ...getMemorySnapshot()
         });
-        const result = await confirmPhotosBatch({ photos, attachmentsToExistingPhotos, targetStatus });
+        const result = await confirmPhotosBatch({ photos, attachmentsToExistingPhotos, targetStatus, signal: abortSignalForResponse(res) });
         const summary = {
             created: result.created.length,
             failed: result.failed.length,
             createdAttachments: result.createdAttachments.length,
             failedAttachments: result.failedAttachments.length
         };
+        const alreadyConfirmed = result.created.filter((photo) => photo.alreadyConfirmed).length
+            + result.createdAttachments.filter((attachment) => attachment.alreadyConfirmed).length;
         if (summary.failed > 0 || summary.failedAttachments > 0) {
-            log.warn('Photo batch confirmed with failures', { ...summary, failures: result.failed, failedAttachments: result.failedAttachments });
+            log.warn('Photo batch confirmed with failures', { ...summary, failures: result.failed, failedAttachments: result.failedAttachments, ...getMemorySnapshot() });
         } else {
-            log.info('Photo batch confirmed', summary);
+            log.info('Photo batch confirmed', { ...summary, ...(alreadyConfirmed > 0 && { alreadyConfirmed }), ...getMemorySnapshot() });
         }
         res.status(201).json(result);
     } catch (error) {

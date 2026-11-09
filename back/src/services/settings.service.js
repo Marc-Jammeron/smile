@@ -254,6 +254,10 @@ export const buildWatermarkConfig = async (values) => {
     };
 };
 
+// Saved watermark settings resolved into what buildPreview consumes. Loaded once per
+// confirm request (not per photo): one DB query and at most one S3 GET / text render.
+export const loadWatermarkConfig = async () => buildWatermarkConfig(await loadSavedWatermarkValues());
+
 const toSettingsDTO = async (row) => {
     const original = getOriginalWatermarkValues();
     return {

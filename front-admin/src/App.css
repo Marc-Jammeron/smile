@@ -181,6 +181,44 @@
   transition: width 0.2s ease;
 }
 
+.upload-progress-block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.upload-progress-detail {
+  font-size: 12px;
+  color: var(--text);
+}
+
+.upload-report {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--border, #d4d4d8);
+  border-radius: 6px;
+  font-size: 14px;
+  color: var(--text);
+}
+
+.upload-report-warn {
+  border-color: #e5484d;
+}
+
+.upload-report-headline {
+  margin: 0;
+  font-weight: 600;
+}
+
+.upload-report-lines {
+  margin: 0;
+  padding-left: 18px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
 .upload-group-preview {
   display: flex;
   flex-direction: column;

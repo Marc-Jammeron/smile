@@ -151,3 +151,19 @@ test('the thumbnail has no watermark when watermark is false', async () => {
     const { info, pixel } = await decode(putBodies['uploads/c/x-thumb.jpg']);
     assert.ok(isWhite(pixel(info.width - 8 - 40, info.height - 8 - 13)));
 });
+
+test('generateDerivedImages uses a shared watermarkConfig without reading the settings', async () => {
+    loadSavedCalls = 0;
+    putBodies = {};
+    await generateDerivedImages('uploads/c/x.jpg', { watermark: true, watermarkConfig: config({ size: 20 }) });
+    assert.equal(loadSavedCalls, 0);
+    const { info, pixel } = await decode(putBodies['uploads/c/x-thumb.jpg']);
+    assert.ok(isRed(pixel(info.width - 8 - 40, info.height - 8 - 13)));
+});
+
+test('a shared watermarkConfig is ignored when watermark is false', async () => {
+    putBodies = {};
+    await generateDerivedImages('uploads/c/x.jpg', { watermark: false, watermarkConfig: config() });
+    const { info, pixel } = await decode(putBodies['uploads/c/x-thumb.jpg']);
+    assert.ok(isWhite(pixel(info.width - 8 - 40, info.height - 8 - 13)));
+});

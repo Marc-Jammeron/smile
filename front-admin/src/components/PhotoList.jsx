@@ -3,6 +3,7 @@ import Photo from 'front-shared/src/Photo.jsx'
 import PhotoUploadForm from './PhotoUploadForm.jsx'
 import ClientMessageBox from './ClientMessageBox.jsx'
 import { apiFetch } from '../api/http.js'
+import { isCleanReport } from '../utils/uploadMessages.js'
 
 
 const extractZipFilename =(contentDisposition, fallback) => {
@@ -13,7 +14,7 @@ const extractZipFilename =(contentDisposition, fallback) => {
 const MESSAGE_LABEL = (title) =>
     `${title} (optionnel, markdown : **gras**, *italique*, listes, [liens](https://…)) — n'hésite pas à demander à ChatGPT de mettre ton texte au format md avant de le copier-coller`
 
-export default function PhotoList({ collection, photos, loading, onBack, onAddPhotos, onDeletePhoto, onDeleteDeliveredPhoto, onUpdatePhotoStatus, onRevokeAccess, onUpdateMessage, onMarkReady, onDeleteCollection }) {
+export default function PhotoList({ collection, photos, loading, uploading = false, onBack, onAddPhotos, onDeletePhoto, onDeleteDeliveredPhoto, onUpdatePhotoStatus, onRevokeAccess, onUpdateMessage, onMarkReady, onDeleteCollection }) {
     const [showForm, setShowForm] = useState(false)
     const [showDeliveredForm, setShowDeliveredForm] = useState(false)
     const [copied, setCopied] = useState(false)
@@ -37,14 +38,18 @@ export default function PhotoList({ collection, photos, loading, onBack, onAddPh
         ? `${import.meta.env.VITE_CLIENT_BASE_URL}/gallery/${collection.accessToken}`
         : null
 
-    const handleUpload = async (data, onProgress) => {
-        await onAddPhotos(data, onProgress)
-        setShowForm(false)
+    // The form closes by itself only when everything was sent and there is nothing to
+    // report; otherwise it stays open with the summary and the "retry failures" button.
+    const handleUpload = async (data, onProgress, signal) => {
+        const report = await onAddPhotos(data, onProgress, signal)
+        if (isCleanReport(report)) setShowForm(false)
+        return report
     }
 
-    const handleUploadDelivered = async (data, onProgress) => {
-        await onAddPhotos({ ...data, targetStatus: 'DELIVERED' }, onProgress)
-        setShowDeliveredForm(false)
+    const handleUploadDelivered = async (data, onProgress, signal) => {
+        const report = await onAddPhotos({ ...data, targetStatus: 'DELIVERED' }, onProgress, signal)
+        if (isCleanReport(report)) setShowDeliveredForm(false)
+        return report
     }
 
     const handleMarkReady = async () => {
@@ -150,7 +155,7 @@ export default function PhotoList({ collection, photos, loading, onBack, onAddPh
     return (
         <div className="photo-list">
             <div className="photo-list-header">
-                <button className="back-button" onClick={onBack}>&larr; Retour aux collections</button>
+                <button className="back-button" onClick={onBack} disabled={uploading} title={uploading ? "Envoi en cours" : undefined}>&larr; Retour aux collections</button>
                 <h2>{collection.name}</h2>
                 {!loading && (
                     <span className="selection-counter">
@@ -181,7 +186,7 @@ export default function PhotoList({ collection, photos, loading, onBack, onAddPh
                     type="button"
                     className="button-outline button-outline-danger"
                     onClick={handleDeleteCollection}
-                    disabled={deleting}
+                    disabled={deleting || uploading}
                 >
                     {deleting ? 'Suppression...' : 'Supprimer la galerie'}
                 </button>
@@ -275,7 +280,7 @@ export default function PhotoList({ collection, photos, loading, onBack, onAddPh
                                 type="button"
                                 className="button-primary"
                                 onClick={handleMarkReady}
-                                disabled={deliveredPhotos.length === 0 || markingReady}
+                                disabled={deliveredPhotos.length === 0 || markingReady || uploading}
                                 title={deliveredPhotos.length === 0 ? 'Aucune photo livrée uploadée' : undefined}
                             >
                                 {markingReady ? 'Passage en cours...' : 'Marquer comme prêt'}
@@ -289,7 +294,7 @@ export default function PhotoList({ collection, photos, loading, onBack, onAddPh
                         </div>
                     )}
                     {isEditing && showDeliveredForm && (
-                        <PhotoUploadForm onUpload={handleUploadDelivered} onCancel={() => setShowDeliveredForm(false)} existingPhotos={photos} />
+                        <PhotoUploadForm onUpload={handleUploadDelivered} onCancel={() => setShowDeliveredForm(false)} existingPhotos={photos} targetStatus="DELIVERED" />
                     )}
                     {deliveredPhotos.length > 0 ? (
                         <div className="photo-grid">
