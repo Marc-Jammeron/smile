@@ -3,10 +3,33 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import s3Repository from "../repository/s3.repository.js";
 import { validateWatermarkValues, loadSavedWatermarkValues, buildWatermarkConfig } from "./settings.service.js";
+import { LIMITS } from "../config/limits.js";
 import { getMemorySnapshot } from "../utils/memory.js";
 import logger from "../logger.js";
 
 const log = logger.child("image-processing");
+
+// Process-wide libvips settings, applied when this module loads (every code path that can
+// reach sharp imports it). cache(false): each original is processed once, caching its
+// pixels only holds memory. concurrency: libvips threads per operation; on musl (the
+// Alpine image) sharp's default is the host's core count, far above the container's CPU quota.
+export const configureSharp = () => {
+    sharp.cache(false);
+    sharp.concurrency(LIMITS.sharpConcurrency);
+    log.info("sharp configured", {
+        sharp: sharp.versions.sharp,
+        libvips: sharp.versions.vips,
+        concurrency: sharp.concurrency(),
+        cache: false,
+        maxInputPixels: LIMITS.maxInputPixels
+    });
+};
+configureSharp();
+
+// failOn "warning" is sharp's default, spelled out so it is never loosened by accident: a
+// truncated or damaged JPEG is refused instead of rendering a grey band. limitInputPixels
+// makes the decompression-bomb ceiling explicit.
+const INPUT_OPTIONS = Object.freeze({ failOn: "warning", limitInputPixels: LIMITS.maxInputPixels });
 
 const THUMBNAIL_WIDTH = 400;
 const THUMBNAIL_JPEG_QUALITY = 80;
@@ -53,15 +76,27 @@ const applyOpacity = async (input, opacity) => {
         .toBuffer();
 };
 
-export const buildPreview = async (imageBuffer, { watermark = false } = {}) => {
-    const startedAt = performance.now();
-    const { data: resizedBuffer, info } = await sharp(imageBuffer)
+// Stage 1: the only decode of the original. Auto-orients from EXIF (sharp drops the tag
+// on output, so a portrait shot would otherwise come out sideways), shrinks to the preview
+// width and hands back raw pixels: no intermediate JPEG, hence no second lossy generation.
+// toColourspace("srgb") guarantees 3 channels, so the raw pixels are never read back as the
+// wrong layout (grayscale and CMYK JPEGs would otherwise yield 1 or 4 channels).
+const resizeToRaw = (imageBuffer) =>
+    sharp(imageBuffer, INPUT_OPTIONS)
+        .autoOrient()
         .resize({ width: PREVIEW_WIDTH, withoutEnlargement: true })
+        .toColourspace("srgb")
+        .raw()
         .toBuffer({ resolveWithObject: true });
+
+// Stage 2: optional watermark, then the single JPEG encode of the preview.
+const encodePreview = async ({ data, info }, { watermark = false } = {}) => {
+    const startedAt = performance.now();
+    const resized = () => sharp(data, { raw: { width: info.width, height: info.height, channels: info.channels } });
 
     if (!watermark) {
         log.debug("Building preview without watermark", { width: info.width, height: info.height });
-        return sharp(resizedBuffer)
+        return resized()
             .jpeg({ quality: PREVIEW_JPEG_QUALITY })
             .toBuffer();
     }
@@ -89,7 +124,7 @@ export const buildPreview = async (imageBuffer, { watermark = false } = {}) => {
         watermark.position, info.width, info.height, watermarkWidth, watermarkHeight, watermark.margin
     );
 
-    const preview = await sharp(resizedBuffer)
+    const preview = await resized()
         .composite([{ input: watermarkBuffer, left, top }])
         .jpeg({ quality: PREVIEW_JPEG_QUALITY })
         .toBuffer();
@@ -99,6 +134,9 @@ export const buildPreview = async (imageBuffer, { watermark = false } = {}) => {
     });
     return preview;
 };
+
+export const buildPreview = async (imageBuffer, { watermark = false } = {}) =>
+    encodePreview(await resizeToRaw(imageBuffer), { watermark });
 
 let testPhotoBuffer = null;
 
@@ -125,15 +163,22 @@ export const generateWatermarkSample = async (values) => {
 
 // `watermarkConfig` lets a caller that processes several photos resolve the watermark once
 // and share it; without it the saved settings are loaded here, as before.
-export const generateDerivedImages = async (key, { watermark = true, watermarkConfig: sharedWatermarkConfig } = {}) => {
+// `originalSize` is the size S3 reported (HEAD), used for logs so the original Buffer does
+// not have to stay referenced until the end.
+export const generateDerivedImages = async (key, { watermark = true, watermarkConfig: sharedWatermarkConfig, originalSize } = {}) => {
     const startedAt = performance.now();
     log.debug("Generating derived images", { key, watermark });
-    const original = await s3Repository.getObject(key);
     const watermarkConfig = watermark
         ? (sharedWatermarkConfig ?? await buildWatermarkConfig(await loadSavedWatermarkValues()))
         : false;
 
-    const previewBuffer = await buildPreview(original, { watermark: watermarkConfig });
+    let original = await s3Repository.getObject(key);
+    const originalBytes = originalSize ?? original.length;
+    const resized = await resizeToRaw(original);
+    original = null; // the only decode is done: the largest Buffer of the request can be collected
+
+    const previewBuffer = await encodePreview(resized, { watermark: watermarkConfig });
+    resized.data = null;
     const thumbnailBuffer = await buildThumbnail(previewBuffer);
 
     const thumbnailKey = deriveDerivedKey(key, "thumb");
@@ -146,7 +191,7 @@ export const generateDerivedImages = async (key, { watermark = true, watermarkCo
 
     log.info("Derived images generated", {
         key, thumbnailKey, previewKey, watermark,
-        originalBytes: original.length, previewBytes: previewBuffer.length, thumbnailBytes: thumbnailBuffer.length,
+        originalBytes, previewBytes: previewBuffer.length, thumbnailBytes: thumbnailBuffer.length,
         durationMs: Math.round(performance.now() - startedAt),
         ...getMemorySnapshot()
     });

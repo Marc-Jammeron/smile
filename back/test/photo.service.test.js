@@ -41,6 +41,7 @@ let deletedS3Keys = [];
 let lastGenerateDerivedImagesCall = null;
 let currentAttachments = [];
 let signedDownloads = [];
+let headResult = { size: 1234, contentType: 'image/jpeg' };
 let activeGenerations = 0;
 let maxActiveGenerations = 0;
 let generationCalls = [];
@@ -95,6 +96,7 @@ mock.module('../src/repository/s3.repository.js', {
         getSignedUploadUrl: async (collectionId, filename) => ({ url: 'https://s3.example.com/put', key: `uploads/${collectionId}/uuid-${filename}` }),
         getSignedAttachmentUploadUrl: async (collectionId, filename) => ({ url: 'https://s3.example.com/put', key: `attachments/${collectionId}/uuid-${filename}` }),
         objectExists: async () => true,
+        headObject: async () => headResult,
         deleteObject: async (key) => {
             deletedS3Keys.push(key);
             return true;
@@ -697,4 +699,56 @@ test('photos still queued when the client leaves are skipped, those already proc
     assert.equal(created.length, 2);
     assert.equal(failed.length, 4);
     assert.equal(generationCalls.length, 2);
+});
+
+
+// --- Step C4: size source and guard ---
+
+test('confirmPhotosBatch passes the size S3 reported (HEAD) to generateDerivedImages', async () => {
+    currentCollectionStatus = 'SELECTING';
+    resetGenerationTracking();
+    headResult = { size: 4321, contentType: 'image/jpeg' };
+
+    await confirmPhotosBatch({ photos: slowBatch(1) });
+    headResult = { size: 1234, contentType: 'image/jpeg' };
+
+    assert.equal(generationCalls[0].options.originalSize, 4321);
+});
+
+test('confirmPhotosBatch refuses an original above MAX_ORIGINAL_BYTES before any processing', async () => {
+    currentCollectionStatus = 'SELECTING';
+    resetGenerationTracking();
+    headResult = { size: 150_000_001, contentType: 'image/jpeg' };
+
+    const { created, failed } = await confirmPhotosBatch({ photos: slowBatch(2) });
+    headResult = { size: 1234, contentType: 'image/jpeg' };
+
+    assert.equal(created.length, 0);
+    assert.equal(failed.length, 2);
+    assert.match(failed[0].error, /too large to process/);
+    assert.equal(generationCalls.length, 0);
+});
+
+test('confirmPhotosBatch accepts an original of exactly MAX_ORIGINAL_BYTES', async () => {
+    currentCollectionStatus = 'SELECTING';
+    resetGenerationTracking();
+    headResult = { size: 150_000_000, contentType: 'image/jpeg' };
+
+    const { created } = await confirmPhotosBatch({ photos: slowBatch(1) });
+    headResult = { size: 1234, contentType: 'image/jpeg' };
+
+    assert.equal(created.length, 1);
+});
+
+test('confirmPhotosBatch reports a missing original (HEAD 404) in failed, as before', async () => {
+    currentCollectionStatus = 'SELECTING';
+    resetGenerationTracking();
+    headResult = null;
+
+    const { created, failed } = await confirmPhotosBatch({ photos: slowBatch(1) });
+    headResult = { size: 1234, contentType: 'image/jpeg' };
+
+    assert.equal(created.length, 0);
+    assert.match(failed[0].error, /not found in storage/);
+    assert.equal(generationCalls.length, 0);
 });

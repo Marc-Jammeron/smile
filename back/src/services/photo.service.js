@@ -266,10 +266,18 @@ const confirmPhoto = async (photoData, targetStatus, position, { getWatermarkCon
             throw error;
         }
 
-        const exists = await s3Repository.objectExists(key);
-        if (!exists) {
+        // HEAD instead of a bare existence check: its ContentLength is the authoritative size
+        // (the client-supplied `size` can be wrong) and gates the in-memory download below.
+        const head = await s3Repository.headObject(key);
+        if (!head) {
             log.warn("Photo refused: uploaded object missing in storage", { collectionId, key });
             const error = new Error(`Object with key ${key} not found in storage`);
+            error.status = 400;
+            throw error;
+        }
+        if (head.size > LIMITS.maxOriginalBytes) {
+            log.warn("Photo refused: original too large to process", { collectionId, key, bytes: head.size, max: LIMITS.maxOriginalBytes });
+            const error = new Error(`File ${filename} is too large to process (${head.size} bytes, max ${LIMITS.maxOriginalBytes})`);
             error.status = 400;
             throw error;
         }
@@ -288,7 +296,7 @@ const confirmPhoto = async (photoData, targetStatus, position, { getWatermarkCon
             }
             log.debug("Image processing slot acquired", { key, waitMs: Math.round(performance.now() - queuedAt), ...imageProcessingLimit.stats() });
             const watermarkConfig = watermarked ? await getWatermarkConfig() : undefined;
-            return generateDerivedImages(key, { watermark: watermarked, watermarkConfig });
+            return generateDerivedImages(key, { watermark: watermarked, watermarkConfig, originalSize: head.size });
         });
 
         log.debug("Derived images generated", { key, thumbnailKey, previewKey, watermarked });

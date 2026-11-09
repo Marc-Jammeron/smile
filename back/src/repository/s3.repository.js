@@ -2,6 +2,7 @@ import { S3Client, PutObjectCommand, GetObjectCommand, HeadObjectCommand, Delete
 import { Buffer } from "node:buffer";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { randomUUID } from "node:crypto";
+import { collectToBuffer } from "../utils/stream-buffer.js";
 import { SIGNED_URL_TTL_SECONDS } from "../config/signed-urls.js";
 import logger from "../logger.js";
 
@@ -80,12 +81,8 @@ const getObject = async (key) => {
         Key: key,
     });
 
-    const { Body } = await s3.send(command);
-    const chunks = [];
-    for await (const chunk of Body) {
-        chunks.push(chunk);
-    }
-    const buffer = Buffer.concat(chunks);
+    const { Body, ContentLength } = await s3.send(command);
+    const buffer = await collectToBuffer(Body, ContentLength);
     log.debug("Object downloaded", { key, bytes: buffer.length });
     return buffer;
 };
