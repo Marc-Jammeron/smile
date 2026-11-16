@@ -120,9 +120,32 @@ export const readCgroupLimits = (read = readTextFile) => {
     return { cpuMax: cpu.raw, cpuLimitVcpu: cpu.vcpu, memoryMax: memory };
 };
 
+// --- sharp ---------------------------------------------------------------------------
+
+// libvips threads per sharp operation. On Alpine (musl) sharp leaves libvips with one
+// thread per core of the *host* (16 on a 16-core machine), ignoring the container's CPU
+// quota: with 1 vCPU that over-subscription made a photo ~1.8x slower than with a single
+// thread (bench, node:22-alpine --cpus=1: 478 ms -> 269 ms). On glibc sharp already uses 1.
+// The photos are processed in parallel by the worker (WORKER_CONCURRENCY), so one thread
+// per photo is what the CPU quota can actually serve.
+export const SHARP_CONCURRENCY = 1;
+
+let sharpConcurrencyDefault = null;
+
+// Call once at startup, in every entry point (API and worker). Idempotent.
+export const configureSharp = () => {
+    if (sharpConcurrencyDefault === null) {
+        sharpConcurrencyDefault = sharp.concurrency();
+    }
+    sharp.concurrency(SHARP_CONCURRENCY);
+    return { default: sharpConcurrencyDefault, configured: sharp.concurrency() };
+};
+
 export const logRuntimeConfig = () => {
     log.info("Runtime configuration", {
         sharpConcurrency: sharp.concurrency(),
+        // What sharp/libvips picked on its own before configureSharp() (null: never called).
+        sharpConcurrencyDefault,
         sharpCache: sharp.cache(),
         sharpVersion: sharp.versions?.sharp,
         libvipsVersion: sharp.versions?.vips,

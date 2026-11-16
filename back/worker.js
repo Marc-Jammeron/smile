@@ -4,6 +4,7 @@
 import './src/repository/db.repository.js'; // connects and applies the migrations
 import logger from './src/logger.js';
 import { startWorker, stopWorker } from './src/services/photo-worker.service.js';
+import { configureSharp } from './src/services/runtime-metrics.js';
 
 const log = logger.child('worker');
 
@@ -24,4 +25,5 @@ for (const signal of ['SIGTERM', 'SIGINT']) {
     });
 }
 
+configureSharp();
 startWorker();

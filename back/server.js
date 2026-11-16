@@ -1,10 +1,13 @@
 import app from './app.js';
 import logger from './src/logger.js';
 import { startWorker, stopWorker, isWorkerEnabled } from './src/services/photo-worker.service.js';
+import { configureSharp, logRuntimeConfig } from './src/services/runtime-metrics.js';
 
 const log = logger.child('server');
 
 const port = process.env.PORT || 3000;
+
+configureSharp();
 
 app.listen(port, () => {
     log.info('Server listening', {
@@ -21,6 +24,7 @@ if (isWorkerEnabled()) {
     startWorker();
 } else {
     log.info('Photo worker disabled in this process (WORKER_ENABLED=false)');
+    logRuntimeConfig(); // otherwise logged by the worker at startup
 }
 
 // Sans ces handlers, un crash n'apparaît que sur stderr brut, hors du format de log.

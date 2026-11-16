@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseCpuMax, readCgroupLimits, timed, roundTimings, trackJob, startCpuTimer, takeEventLoopLagP99Ms, startEventLoopMonitor } from '../src/services/runtime-metrics.js';
+import sharp from 'sharp';
+import { SHARP_CONCURRENCY, configureSharp, parseCpuMax, readCgroupLimits, timed, roundTimings, trackJob, startCpuTimer, takeEventLoopLagP99Ms, startEventLoopMonitor } from '../src/services/runtime-metrics.js';
 
 test('parseCpuMax reads the cgroup v2 quota as a number of vCPU', () => {
     assert.deepEqual(parseCpuMax('100000 100000\n'), { raw: '100000 100000', vcpu: 1 });
@@ -60,4 +61,15 @@ test('the event loop lag is null until the monitor runs, then a number', async (
     const lag = takeEventLoopLagP99Ms();
     assert.equal(typeof lag, 'number');
     assert.ok(lag >= 0);
+});
+
+test('configureSharp pins sharp.concurrency to 1, whatever libvips picked, and remembers the default', () => {
+    assert.equal(SHARP_CONCURRENCY, 1);
+    sharp.concurrency(16); // what libvips picks on Alpine: one thread per host core
+    assert.deepEqual(configureSharp(), { default: 16, configured: 1 });
+    assert.equal(sharp.concurrency(), 1);
+    // idempotent: a second call keeps the original default and the setting
+    sharp.concurrency(8);
+    assert.deepEqual(configureSharp(), { default: 16, configured: 1 });
+    assert.equal(sharp.concurrency(), 1);
 });
