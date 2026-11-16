@@ -3,8 +3,13 @@ import { Buffer } from "node:buffer";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { v4 as uuid } from "uuid";
 import logger from "../logger.js";
+import { createPresignedUrlCache } from "./presigned-url-cache.js";
 
 const log = logger.child("s3");
+
+const SIGNED_URL_EXPIRES_IN_S = 300;
+// Under the expiry on purpose: a cached URL always has >= 60 s left when it is served.
+const SIGNED_URL_CACHE_TTL_MS = 240_000;
 
 const s3 = new S3Client({
     endpoint: process.env.S3_ENDPOINT,       // undefined en prod = AWS SDK utilise l'endpoint AWS par défaut
@@ -62,16 +67,20 @@ const getSignedBrandingUploadUrl = async (kind, contentType) => {
     return { url, key };
 };
 
-const getSignedDownloadUrl = async (key) => {
+const signDownloadUrl = async (key) => {
     const command = new GetObjectCommand({
         Bucket: BUCKET,
         Key: key,
     });
 
     log.debug("Signing download url", { key });
-    const url = await getSignedUrl(s3, command, { expiresIn: 300 });
-    return url;
+    return getSignedUrl(s3, command, { expiresIn: SIGNED_URL_EXPIRES_IN_S });
 };
+
+const downloadUrlCache = createPresignedUrlCache({ ttlMs: SIGNED_URL_CACHE_TTL_MS });
+
+// Same URL for the same key during SIGNED_URL_CACHE_TTL_MS (see presigned-url-cache.js).
+const getSignedDownloadUrl = (key) => downloadUrlCache.get(key, signDownloadUrl);
 
 const getObject = async (key) => {
     const command = new GetObjectCommand({
@@ -109,6 +118,7 @@ const putObject = async (key, body, contentType) => {
     });
 
     await s3.send(command);
+    downloadUrlCache.invalidate(key);
     log.debug("Object stored", { key, contentType, bytes: Buffer.isBuffer(body) ? body.length : undefined });
     return key;
 };
@@ -161,6 +171,7 @@ const deleteObject = async (key) => {
 
     try {
         await s3.send(command);
+        downloadUrlCache.invalidate(key);
         log.debug("Object deleted", { key });
         return true;
     } catch (error) {

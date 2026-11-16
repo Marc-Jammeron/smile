@@ -3,6 +3,7 @@ import db from "../repository/db.repository.js";
 import s3Repository from "../repository/s3.repository.js";
 import { generateDerivedImages } from "./image-processing.service.js";
 import { completeSendIfReady, sweepSendRequests } from "./collection-send.service.js";
+import { startEventLoopMonitor, logRuntimeConfig } from "./runtime-metrics.js";
 import logger from "../logger.js";
 
 const log = logger.child("photo-worker");
@@ -218,6 +219,9 @@ export const startWorker = () => {
     };
 
     log.info("Photo worker started", config);
+    // Measurements for the "Derived images generated" log line (see image-processing.service.js).
+    logRuntimeConfig();
+    startEventLoopMonitor();
     const loopPromise = runLoop();
     sweepTimer = setInterval(sweep, SWEEP_INTERVAL_MS);
     sweepTimer.unref();

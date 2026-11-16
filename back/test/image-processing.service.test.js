@@ -7,10 +7,11 @@ import sharp from 'sharp';
 let loadSavedCalls = 0;
 let putObjects = [];
 let putBodies = {};
+let nextOriginal = null; // overrides the photo returned by the mocked S3 (default: originalBuffer)
 
 mock.module('../src/repository/s3.repository.js', {
     defaultExport: {
-        getObject: async () => originalBuffer,
+        getObject: async () => nextOriginal ?? originalBuffer,
         putObject: async (key, body) => { putObjects.push(key); putBodies[key] = body; return key; },
     },
 });
@@ -150,4 +151,51 @@ test('the thumbnail has no watermark when watermark is false', async () => {
     await generateDerivedImages('uploads/c/x.jpg', { watermark: false });
     const { info, pixel } = await decode(putBodies['uploads/c/x-thumb.jpg']);
     assert.ok(isWhite(pixel(info.width - 8 - 40, info.height - 8 - 13)));
+});
+
+// A phone's portrait photo: landscape pixels (left half red, right half blue) + EXIF
+// Orientation=6 ("rotate 90° clockwise to display"). Displayed upright it is portrait,
+// with the red half on top.
+const portraitWithExifOrientation = (width, height) => sharp({ create: { width, height, channels: 3, background: '#0000ff' } })
+    .composite([{ input: { create: { width: width / 2, height, channels: 3, background: '#ff0000' } }, left: 0, top: 0 }])
+    .jpeg({ quality: 95, chromaSubsampling: '4:4:4' })
+    .withMetadata({ orientation: 6 })
+    .toBuffer();
+
+test('buildPreview applies the EXIF orientation: a portrait photo stays portrait, upright', async () => {
+    const source = await portraitWithExifOrientation(600, 400);
+    assert.equal((await sharp(source).metadata()).orientation, 6);
+    const { info, pixel } = await decode(await buildPreview(source, { watermark: false }));
+    assert.equal(info.width, 400); // 400x600 once rotated, not enlarged
+    assert.equal(info.height, 600);
+    assert.ok(isRed(pixel(200, 100)), 'the red half must be on top');
+    assert.ok(pixel(200, 500).b > 200 && pixel(200, 500).r < 60, 'the blue half must be at the bottom');
+});
+
+test('a large portrait photo is resized on its displayed width (1200 x 1800)', async () => {
+    const source = await portraitWithExifOrientation(3000, 2000);
+    const { info } = await decode(await buildPreview(source, { watermark: false }));
+    assert.equal(info.width, 1200);
+    assert.equal(info.height, 1800);
+});
+
+test('generateDerivedImages: the preview and the thumbnail of a portrait photo are upright', async () => {
+    putBodies = {};
+    nextOriginal = await portraitWithExifOrientation(3000, 2000);
+    try {
+        await generateDerivedImages('uploads/c/portrait.jpg', { watermark: false });
+    } finally {
+        nextOriginal = null;
+    }
+    const preview = await decode(putBodies['uploads/c/portrait-preview.jpg']);
+    assert.deepEqual([preview.info.width, preview.info.height], [1200, 1800]);
+    assert.ok(isRed(preview.pixel(600, 300)));
+    const thumb = await decode(putBodies['uploads/c/portrait-thumb.jpg']);
+    assert.deepEqual([thumb.info.width, thumb.info.height], [400, 600]);
+    assert.ok(isRed(thumb.pixel(200, 100)));
+});
+
+test('a photo without EXIF orientation is left as it is', async () => {
+    const { info } = await decode(await buildPreview(originalBuffer, { watermark: false }));
+    assert.deepEqual([info.width, info.height], [1200, 800]);
 });

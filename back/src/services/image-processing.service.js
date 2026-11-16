@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import s3Repository from "../repository/s3.repository.js";
 import { validateWatermarkValues, loadSavedWatermarkValues, buildWatermarkConfig } from "./settings.service.js";
 import logger from "../logger.js";
+import { timed, roundTimings, startCpuTimer, trackJob, takeEventLoopLagP99Ms } from "./runtime-metrics.js";
 
 const log = logger.child("image-processing");
 
@@ -52,46 +53,56 @@ const applyOpacity = async (input, opacity) => {
         .toBuffer();
 };
 
-export const buildPreview = async (imageBuffer, { watermark = false } = {}) => {
+// `timings`, when given, receives the duration (ms) of each stage: `decodeResizeMs`,
+// `watermarkMs` (watermark resize + opacity + metadata) and `composeEncodeMs` (composite
+// and JPEG encoding are one sharp pipeline, so they are timed together).
+export const buildPreview = async (imageBuffer, { watermark = false, timings = null } = {}) => {
     const startedAt = performance.now();
-    const { data: resizedBuffer, info } = await sharp(imageBuffer)
+    // autoOrient first: phones and cameras store portrait photos as landscape pixels plus
+    // an EXIF Orientation tag, which the derived JPEGs (written without metadata) lose.
+    // Rotating before the resize also makes `width: 1200` apply to the displayed width.
+    const { data: resizedBuffer, info } = await timed(timings, "decodeResizeMs", () => sharp(imageBuffer)
+        .autoOrient()
         .resize({ width: PREVIEW_WIDTH, withoutEnlargement: true })
-        .toBuffer({ resolveWithObject: true });
+        .toBuffer({ resolveWithObject: true }));
 
     if (!watermark) {
         log.debug("Building preview without watermark", { width: info.width, height: info.height });
-        return sharp(resizedBuffer)
+        return timed(timings, "composeEncodeMs", () => sharp(resizedBuffer)
             .jpeg({ quality: PREVIEW_JPEG_QUALITY })
-            .toBuffer();
+            .toBuffer());
     }
 
-    let watermarkInput = watermark.image;
-    if (watermark.size != null) {
-        const targetWidth = Math.max(1, Math.round(info.width * watermark.size / 100));
-        watermarkInput = await sharp(watermarkInput).resize({ width: targetWidth }).toBuffer();
-    }
+    const { watermarkBuffer, watermarkWidth, watermarkHeight } = await timed(timings, "watermarkMs", async () => {
+        let watermarkInput = watermark.image;
+        if (watermark.size != null) {
+            const targetWidth = Math.max(1, Math.round(info.width * watermark.size / 100));
+            watermarkInput = await sharp(watermarkInput).resize({ width: targetWidth }).toBuffer();
+        }
 
-    let watermarkBuffer = await applyOpacity(watermarkInput, watermark.opacity);
-    let { width: watermarkWidth, height: watermarkHeight } = await sharp(watermarkBuffer).metadata();
+        let buffer = await applyOpacity(watermarkInput, watermark.opacity);
+        let { width, height } = await sharp(buffer).metadata();
 
-    if (watermarkWidth > info.width || watermarkHeight > info.height) {
-        log.debug("Watermark larger than the photo, shrinking it", { watermarkWidth, watermarkHeight, photoWidth: info.width, photoHeight: info.height });
-        const shrunk = await sharp(watermarkBuffer)
-            .resize({ width: info.width, height: info.height, fit: "inside" })
-            .toBuffer({ resolveWithObject: true });
-        watermarkBuffer = shrunk.data;
-        watermarkWidth = shrunk.info.width;
-        watermarkHeight = shrunk.info.height;
-    }
+        if (width > info.width || height > info.height) {
+            log.debug("Watermark larger than the photo, shrinking it", { watermarkWidth: width, watermarkHeight: height, photoWidth: info.width, photoHeight: info.height });
+            const shrunk = await sharp(buffer)
+                .resize({ width: info.width, height: info.height, fit: "inside" })
+                .toBuffer({ resolveWithObject: true });
+            buffer = shrunk.data;
+            width = shrunk.info.width;
+            height = shrunk.info.height;
+        }
+        return { watermarkBuffer: buffer, watermarkWidth: width, watermarkHeight: height };
+    });
 
     const { left, top } = computeCornerOffset(
         watermark.position, info.width, info.height, watermarkWidth, watermarkHeight, watermark.margin
     );
 
-    const preview = await sharp(resizedBuffer)
+    const preview = await timed(timings, "composeEncodeMs", () => sharp(resizedBuffer)
         .composite([{ input: watermarkBuffer, left, top }])
         .jpeg({ quality: PREVIEW_JPEG_QUALITY })
-        .toBuffer();
+        .toBuffer());
     log.debug("Preview built with watermark", {
         width: info.width, height: info.height, position: watermark.position, left, top, bytes: preview.length,
         durationMs: Math.round(performance.now() - startedAt)
@@ -122,27 +133,49 @@ export const generateWatermarkSample = async (values) => {
     return buildPreview(await loadTestPhoto(), { watermark: config });
 };
 
+// One info line per photo with the time of every stage, to see where the time goes:
+// `timings` (wall time, ms; the S3 stages include the network), `cpuUserMs`/`cpuSystemMs`
+// (process-wide, see runtime-metrics.js), `eventLoopLagP99Ms` and `concurrentJobs`.
+// `durationMs` covers everything below, S3 transfers included.
 export const generateDerivedImages = async (key, { watermark = true } = {}) => {
     const startedAt = performance.now();
-    log.debug("Generating derived images", { key, watermark });
-    const original = await s3Repository.getObject(key);
-    const watermarkConfig = watermark ? await buildWatermarkConfig(await loadSavedWatermarkValues()) : false;
+    const readCpu = startCpuTimer();
+    const finishJob = trackJob();
+    const timings = {};
+    try {
+        log.debug("Generating derived images", { key, watermark });
 
-    const previewBuffer = await buildPreview(original, { watermark: watermarkConfig });
-    const thumbnailBuffer = await buildThumbnail(previewBuffer);
+        const original = await timed(timings, "s3GetMs", () => s3Repository.getObject(key));
+        let watermarkConfig = false;
+        if (watermark) {
+            const savedValues = await timed(timings, "settingsMs", () => loadSavedWatermarkValues());
+            watermarkConfig = await timed(timings, "watermarkPrepMs", () => buildWatermarkConfig(savedValues));
+        }
 
-    const thumbnailKey = deriveDerivedKey(key, "thumb");
-    const previewKey = deriveDerivedKey(key, "preview");
+        const previewBuffer = await buildPreview(original, { watermark: watermarkConfig, timings });
+        const thumbnailBuffer = await timed(timings, "thumbnailMs", () => buildThumbnail(previewBuffer));
 
-    await Promise.all([
-        s3Repository.putObject(thumbnailKey, thumbnailBuffer, "image/jpeg"),
-        s3Repository.putObject(previewKey, previewBuffer, "image/jpeg")
-    ]);
+        const thumbnailKey = deriveDerivedKey(key, "thumb");
+        const previewKey = deriveDerivedKey(key, "preview");
 
-    log.info("Derived images generated", {
-        key, thumbnailKey, previewKey, watermark,
-        originalBytes: original.length, previewBytes: previewBuffer.length, thumbnailBytes: thumbnailBuffer.length,
-        durationMs: Math.round(performance.now() - startedAt)
-    });
-    return { thumbnailKey, previewKey };
+        await timed(timings, "s3PutMs", () => Promise.all([
+            s3Repository.putObject(thumbnailKey, thumbnailBuffer, "image/jpeg"),
+            s3Repository.putObject(previewKey, previewBuffer, "image/jpeg")
+        ]));
+
+        const concurrentJobs = finishJob();
+        log.info("Derived images generated", {
+            key, thumbnailKey, previewKey, watermark,
+            originalBytes: original.length, previewBytes: previewBuffer.length, thumbnailBytes: thumbnailBuffer.length,
+            durationMs: Math.round(performance.now() - startedAt),
+            timings: roundTimings(timings),
+            ...readCpu(),
+            eventLoopLagP99Ms: takeEventLoopLagP99Ms(),
+            concurrentJobs
+        });
+        return { thumbnailKey, previewKey };
+    } finally {
+        // Also on failure, or the job would be counted as running forever.
+        finishJob();
+    }
 };

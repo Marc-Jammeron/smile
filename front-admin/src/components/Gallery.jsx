@@ -2,6 +2,7 @@ import CollectionList from './CollectionList.jsx'
 import PhotoList from './PhotoList.jsx'
 import { useState, useEffect, useRef } from 'react'
 import { runWithConcurrency } from '../utils/concurrency.js'
+import { planListReload } from '../utils/processingPoll.js'
 import { sortGroupsForUpload } from '../utils/photoGrouping.js'
 import { apiFetch } from '../api/http.js'
 
@@ -22,7 +23,11 @@ export default function Gallery() {
     const [pollNonce, setPollNonce] = useState(0)
     const selectedCollectionRef = useRef(null)
     selectedCollectionRef.current = selectedCollection
+    // Polling bookkeeping (see utils/processingPoll.js): last done/failed counters seen, whether
+    // a change is waiting for a list reload, and when the list was last loaded.
     const lastCountsRef = useRef(null)
+    const listDirtyRef = useRef(false)
+    const lastListLoadAtRef = useRef(0)
     const selectedCollectionId = selectedCollection?.id ?? null
 
     const replaceCollection = (updatedCollection) => {
@@ -141,7 +146,12 @@ export default function Gallery() {
         let cancelled = false
         setLoadingPhotos(true)
         fetchPhotos(selectedCollectionId)
-            .then(data => { if (!cancelled) setPhotos(data) })
+            .then(data => {
+                if (cancelled) return
+                setPhotos(data)
+                listDirtyRef.current = false
+                lastListLoadAtRef.current = Date.now()
+            })
             .catch(error => console.error('Error fetching photos:', error))
             .finally(() => { if (!cancelled) setLoadingPhotos(false) })
         return () => { cancelled = true }
@@ -149,6 +159,9 @@ export default function Gallery() {
 
     // Polls the background processing every few seconds while photos are queued or being
     // processed, or while a link request waits for them; stops by itself afterwards.
+    // A tick only calls processing-status. The photo list (heavy) is reloaded only when the
+    // done or failed counter moved, at most every LIST_RELOAD_MIN_INTERVAL_MS, plus once
+    // more when the queue is empty.
     useEffect(() => {
         if (!selectedCollectionId) {
             setProcessing(null)
@@ -170,14 +183,20 @@ export default function Gallery() {
                 if (cancelled) return
                 setProcessing(status)
 
-                // Thumbnails and failures only show up in the photo list: reload it when a counter moved.
-                const countsKey = [status.queued, status.processing, status.done, status.failed].join('-')
-                const countsChanged = lastCountsRef.current !== null && lastCountsRef.current !== countsKey
-                lastCountsRef.current = countsKey
-                if (countsChanged) {
+                // Thumbnails and failures only show up in the photo list.
+                const plan = planListReload(status, {
+                    lastKey: lastCountsRef.current,
+                    dirty: listDirtyRef.current,
+                    lastReloadAt: lastListLoadAtRef.current
+                }, Date.now())
+                lastCountsRef.current = plan.key
+                listDirtyRef.current = plan.dirty
+                if (plan.reload) {
                     const freshPhotos = await fetchPhotos(selectedCollectionId)
                     if (cancelled) return
                     setPhotos(freshPhotos)
+                    listDirtyRef.current = false
+                    lastListLoadAtRef.current = Date.now()
                 }
 
                 // The server may have sent the link (status change, access token) or the request was dropped.
