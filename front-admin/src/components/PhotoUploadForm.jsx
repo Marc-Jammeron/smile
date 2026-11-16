@@ -106,6 +106,7 @@ export default function PhotoUploadForm({ onUpload, onCancel, existingPhotos = [
             />
             {submitting && progress && (
                 <div className="upload-progress">
+                    <span>Envoi</span>
                     <div className="upload-progress-bar">
                         <div
                             className="upload-progress-fill"

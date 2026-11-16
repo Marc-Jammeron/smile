@@ -13,7 +13,7 @@ const extractZipFilename =(contentDisposition, fallback) => {
 const MESSAGE_LABEL = (title) =>
     `${title} (optionnel, markdown : **gras**, *italique*, listes, [liens](https://…)) — n'hésite pas à demander à ChatGPT de mettre ton texte au format md avant de le copier-coller`
 
-export default function PhotoList({ collection, photos, loading, onBack, onAddPhotos, onDeletePhoto, onDeleteDeliveredPhoto, onUpdatePhotoStatus, onRevokeAccess, onUpdateMessage, onMarkReady, onDeleteCollection }) {
+export default function PhotoList({ collection, photos, loading, onBack, onAddPhotos, onDeletePhoto, onDeleteDeliveredPhoto, onUpdatePhotoStatus, onRevokeAccess, onUpdateMessage, onMarkReady, onDeleteCollection, processing, onRetryPhoto, onCancelSendRequest }) {
     const [showForm, setShowForm] = useState(false)
     const [showDeliveredForm, setShowDeliveredForm] = useState(false)
     const [copied, setCopied] = useState(false)
@@ -24,6 +24,7 @@ export default function PhotoList({ collection, photos, loading, onBack, onAddPh
     const [markReadyError, setMarkReadyError] = useState(null)
     const [deleting, setDeleting] = useState(false)
     const [deleteError, setDeleteError] = useState(null)
+    const [cancellingSend, setCancellingSend] = useState(false)
     const canSelect = collection.status === 'SELECTING'
     const canAddPhotos = !['EDITING', 'READY', 'ARCHIVED'].includes(collection.status)
     const isEditing = collection.status === 'EDITING'
@@ -33,6 +34,10 @@ export default function PhotoList({ collection, photos, loading, onBack, onAddPh
     const hasSelection = collection.maxPhotos > 0 || selectedCount > 0
     const deliveredPhotos = photos.filter(photo => photo.status === 'DELIVERED')
     const otherPhotos = photos.filter(photo => photo.status !== 'DELIVERED')
+    const deliveredInProcessing = deliveredPhotos.filter(photo => photo.processingStatus && photo.processingStatus !== 'DONE').length
+    const processingTotal = processing ? processing.queued + processing.processing + processing.done + processing.failed : 0
+    const processingRemaining = processing ? processing.queued + processing.processing : 0
+    const sendPending = collection.status === 'DRAFT' && Boolean(collection.sendRequestedAt)
     const clientGalleryUrl = collection.accessToken
         ? `${import.meta.env.VITE_CLIENT_BASE_URL}/gallery/${collection.accessToken}`
         : null
@@ -67,6 +72,18 @@ export default function PhotoList({ collection, photos, loading, onBack, onAddPh
             setMarkReadyError(error.message)
         } finally {
             setMarkingReady(false)
+        }
+    }
+
+    const handleCancelSend = async () => {
+        setCancellingSend(true)
+        try {
+            await onCancelSendRequest(collection.id)
+        } catch (error) {
+            console.error('Error cancelling the send request:', error)
+            alert("L'annulation de la demande d'envoi a échoué")
+        } finally {
+            setCancellingSend(false)
         }
     }
 
@@ -216,6 +233,31 @@ export default function PhotoList({ collection, photos, loading, onBack, onAddPh
                     <button type="button" className="toast-dismiss" onClick={() => setDownloadError(null)} aria-label="Fermer">×</button>
                 </div>
             )}
+            {processingRemaining > 0 && (
+                <div className="upload-progress processing-progress" role="status">
+                    <span>Traitement des photos</span>
+                    <div className="upload-progress-bar">
+                        <div
+                            className="upload-progress-fill"
+                            style={{ width: `${(processing.done / processingTotal) * 100}%` }}
+                        />
+                    </div>
+                    <span>{processing.done} / {processingTotal}</span>
+                </div>
+            )}
+            {processing?.failed > 0 && (
+                <p className="status-message processing-failed-note">
+                    {processing.failed} photo{processing.failed > 1 ? 's' : ''} en échec : réessaie ou supprime-la{processing.failed > 1 ? 's' : ''}.
+                </p>
+            )}
+            {sendPending && (
+                <div className="send-pending-box" role="status">
+                    <span>Préparation des photos, le lien sera disponible automatiquement</span>
+                    <button type="button" className="button-outline" onClick={handleCancelSend} disabled={cancellingSend}>
+                        {cancellingSend ? 'Annulation...' : 'Annuler la demande'}
+                    </button>
+                </div>
+            )}
             {collection.status === 'SELECTING' && canViewAsClient && (
                 <ClientMessageBox
                     id="client-message"
@@ -275,8 +317,10 @@ export default function PhotoList({ collection, photos, loading, onBack, onAddPh
                                 type="button"
                                 className="button-primary"
                                 onClick={handleMarkReady}
-                                disabled={deliveredPhotos.length === 0 || markingReady}
-                                title={deliveredPhotos.length === 0 ? 'Aucune photo livrée uploadée' : undefined}
+                                disabled={deliveredPhotos.length === 0 || deliveredInProcessing > 0 || markingReady}
+                                title={deliveredPhotos.length === 0
+                                    ? 'Aucune photo livrée uploadée'
+                                    : deliveredInProcessing > 0 ? 'Des photos livrées sont encore en traitement' : undefined}
                             >
                                 {markingReady ? 'Passage en cours...' : 'Marquer comme prêt'}
                             </button>
@@ -298,6 +342,7 @@ export default function PhotoList({ collection, photos, loading, onBack, onAddPh
                                     key={photo.id}
                                     photo={photo}
                                     onDelete={isEditing ? onDeleteDeliveredPhoto : null}
+                                    onRetry={onRetryPhoto}
                                 />
                             ))}
                         </div>
@@ -318,6 +363,7 @@ export default function PhotoList({ collection, photos, loading, onBack, onAddPh
                             photo={photo}
                             onDelete={onDeletePhoto}
                             onUpdateStatus={canSelect ? onUpdatePhotoStatus : null}
+                            onRetry={onRetryPhoto}
                         />
                     ))}
                 </div>

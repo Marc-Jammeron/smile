@@ -9,7 +9,11 @@ export default function CollectionCard({ collection, onClick, onChangeStatus }) 
         const status = event.target.value
         setUpdating(true)
         try {
-            await onChangeStatus(collection.id, status)
+            const result = await onChangeStatus(collection.id, status)
+            // Link requested while photos are still being processed: the server sends it later.
+            if (result?.deferred) {
+                alert(result.message)
+            }
         } catch (error) {
             console.error('Error updating collection status:', error)
             alert('Le changement de statut a échoué')
@@ -26,6 +30,9 @@ export default function CollectionCard({ collection, onClick, onChangeStatus }) 
         <div className="collection-card" onClick={onClick}>
             <h4 className="collection-card-title">{collection.name}</h4>
             <p className="collection-card-client">{collection.clientName}</p>
+            {collection.sendRequestedAt && collection.status === 'DRAFT' && (
+                <p className="collection-card-pending">Lien en attente : photos en préparation</p>
+            )}
             <div className="collection-card-footer">
                 <span className="collection-card-photo-count">{photoCount} photo{photoCount > 1 ? 's' : ''}</span>
                 <div className={`collection-card-status status-${collection.status?.toLowerCase()}`}>

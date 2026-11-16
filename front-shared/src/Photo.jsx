@@ -46,8 +46,13 @@ export function PhotoSelectionButtons({ photo, onUpdateStatus, allowReset = true
     )
 }
 
-export default function Photo({ photo, onDelete, onUpdateStatus, onOpen, allowReset = true, downloadUrl, downloadFilename }) {
+// `processingStatus` only exists on the admin photos (the client API only returns DONE photos
+// and strips it), so the placeholder below never shows up in the client gallery.
+const PROCESSING_LABELS = { QUEUED: 'En attente…', PROCESSING: 'Traitement…' }
+
+export default function Photo({ photo, onDelete, onUpdateStatus, onOpen, onRetry, allowReset = true, downloadUrl, downloadFilename }) {
     const [deleting, setDeleting] = useState(false)
+    const [retrying, setRetrying] = useState(false)
     const [downloading, setDownloading] = useState(false)
 
     const handleDelete = async () => {
@@ -92,14 +97,52 @@ export default function Photo({ photo, onDelete, onUpdateStatus, onOpen, allowRe
         }
     }
 
+    const handleRetry = async () => {
+        setRetrying(true)
+        try {
+            await onRetry(photo.id)
+        } catch (error) {
+            console.error('Error retrying photo processing:', error)
+            alert(error.message || 'Impossible de relancer le traitement')
+        } finally {
+            setRetrying(false)
+        }
+    }
+
+    const isProcessed = !photo.processingStatus || photo.processingStatus === 'DONE'
+    const isFailed = photo.processingStatus === 'FAILED'
+
     return (
         <div className={`photo photo-status-${photo.status.toLowerCase()}`}>
-            <img
-                src={photo.thumbnailUrl || photo.url}
-                alt={photo.description || ''}
-                onClick={onOpen}
-                style={onOpen ? { cursor: 'zoom-in' } : undefined}
-            />
+            {isProcessed ? (
+                <img
+                    src={photo.thumbnailUrl || photo.url}
+                    alt={photo.description || ''}
+                    onClick={onOpen}
+                    style={onOpen ? { cursor: 'zoom-in' } : undefined}
+                />
+            ) : (
+                <div
+                    className={`photo-placeholder${isFailed ? ' photo-placeholder-failed' : ''}`}
+                    title={isFailed ? (photo.processingError || undefined) : photo.originalFilename || undefined}
+                >
+                    {isFailed ? (
+                        <>
+                            <span className="photo-failed-badge">Échec</span>
+                            {onRetry && (
+                                <button type="button" className="photo-retry-button" onClick={handleRetry} disabled={retrying}>
+                                    {retrying ? '…' : 'Réessayer'}
+                                </button>
+                            )}
+                        </>
+                    ) : (
+                        <>
+                            <span className="button-spinner" />
+                            <span>{PROCESSING_LABELS[photo.processingStatus] ?? 'En attente…'}</span>
+                        </>
+                    )}
+                </div>
+            )}
             {onUpdateStatus && (
                 <PhotoSelectionButtons photo={photo} onUpdateStatus={onUpdateStatus} allowReset={allowReset} />
             )}

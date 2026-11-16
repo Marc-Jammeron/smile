@@ -1,12 +1,13 @@
 import CollectionList from './CollectionList.jsx'
 import PhotoList from './PhotoList.jsx'
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { runWithConcurrency } from '../utils/concurrency.js'
 import { sortGroupsForUpload } from '../utils/photoGrouping.js'
 import { apiFetch } from '../api/http.js'
 
 const UPLOAD_CONCURRENCY = 4
 const CONFIRM_CHUNK_SIZE = 20
+const PROCESSING_POLL_INTERVAL_MS = 3000
 
 
 export default function Gallery() {
@@ -14,6 +15,29 @@ export default function Gallery() {
     const [photos, setPhotos] = useState([])
     const [selectedCollection, setSelectedCollection] = useState(null)
     const [loadingPhotos, setLoadingPhotos] = useState(false)
+    // Counters of the background image processing of the selected collection (null until
+    // the first poll answers). `pollNonce` restarts the polling after an action that
+    // queues work (upload, retry, deferred send).
+    const [processing, setProcessing] = useState(null)
+    const [pollNonce, setPollNonce] = useState(0)
+    const selectedCollectionRef = useRef(null)
+    selectedCollectionRef.current = selectedCollection
+    const lastCountsRef = useRef(null)
+    const selectedCollectionId = selectedCollection?.id ?? null
+
+    const replaceCollection = (updatedCollection) => {
+        setCollections(current => current.map(collection =>
+            collection.id === updatedCollection.id ? updatedCollection : collection
+        ))
+        setSelectedCollection(current =>
+            current && current.id === updatedCollection.id ? updatedCollection : current
+        )
+    }
+
+    const fetchPhotos = async (collectionId) => {
+        const response = await apiFetch(`/photos/collection/${collectionId}`)
+        return response.json()
+    }
 
     useEffect(() => {
         apiFetch('/collections')
@@ -44,10 +68,49 @@ export default function Gallery() {
         if (!response.ok) {
             throw new Error('Failed to update collection status')
         }
-        const updatedCollection = await response.json()
+        const body = await response.json()
+        // 202: the link was requested while photos are still being processed. The
+        // collection stays a DRAFT and the server sends the link by itself afterwards.
+        if (response.status === 202) {
+            setCollections(current => current.map(collection =>
+                collection.id === collectionId ? body.collection : collection
+            ))
+            return { deferred: true, message: body.message }
+        }
         setCollections(current => current.map(collection =>
-            collection.id === collectionId ? updatedCollection : collection
+            collection.id === collectionId ? body : collection
         ))
+        return { deferred: false }
+    }
+
+    const handleBack = () => {
+        setSelectedCollection(null)
+        // The board is not polled: refresh it, a pending link may have been sent meanwhile.
+        apiFetch('/collections')
+            .then(response => response.json())
+            .then(data => setCollections(data))
+            .catch(error => console.error('Error fetching collections:', error))
+    }
+
+    const handleCancelSendRequest = async (collectionId) => {
+        const response = await apiFetch(`/collections/${collectionId}/send-request`, { method: 'DELETE' })
+        if (!response.ok) {
+            throw new Error("Failed to cancel the link request")
+        }
+        const updatedCollection = await response.json()
+        replaceCollection({ ...updatedCollection, Photos: selectedCollectionRef.current?.Photos })
+    }
+
+    const handleRetryPhoto = async (photoId) => {
+        const response = await apiFetch(`/photos/${photoId}/retry`, { method: 'POST' })
+        if (!response.ok) {
+            const data = await response.json().catch(() => ({}))
+            throw new Error(data.error || 'Failed to retry the photo')
+        }
+        setPhotos(current => current.map(photo =>
+            photo.id === photoId ? { ...photo, processingStatus: 'QUEUED', processingAttempts: 0 } : photo
+        ))
+        setPollNonce(nonce => nonce + 1)
     }
 
     const handleUpdateMessage = async (collectionId, field, message) => {
@@ -70,18 +133,88 @@ export default function Gallery() {
     }
 
     useEffect(() => {
-        if (!selectedCollection) {
+        if (!selectedCollectionId) {
             setPhotos([])
             return
         }
 
+        let cancelled = false
         setLoadingPhotos(true)
-        apiFetch(`/photos/collection/${selectedCollection.id}`)
-            .then(response => response.json())
-            .then(data => setPhotos(data))
+        fetchPhotos(selectedCollectionId)
+            .then(data => { if (!cancelled) setPhotos(data) })
             .catch(error => console.error('Error fetching photos:', error))
-            .finally(() => setLoadingPhotos(false))
-    }, [selectedCollection])
+            .finally(() => { if (!cancelled) setLoadingPhotos(false) })
+        return () => { cancelled = true }
+    }, [selectedCollectionId])
+
+    // Polls the background processing every few seconds while photos are queued or being
+    // processed, or while a link request waits for them; stops by itself afterwards.
+    useEffect(() => {
+        if (!selectedCollectionId) {
+            setProcessing(null)
+            lastCountsRef.current = null
+            return
+        }
+
+        let cancelled = false
+        let timer = null
+        let keepPolling = false
+
+        const tick = async () => {
+            try {
+                const response = await apiFetch(`/collections/${selectedCollectionId}/processing-status`)
+                if (!response.ok) {
+                    throw new Error('Failed to fetch the processing status')
+                }
+                const status = await response.json()
+                if (cancelled) return
+                setProcessing(status)
+
+                // Thumbnails and failures only show up in the photo list: reload it when a counter moved.
+                const countsKey = [status.queued, status.processing, status.done, status.failed].join('-')
+                const countsChanged = lastCountsRef.current !== null && lastCountsRef.current !== countsKey
+                lastCountsRef.current = countsKey
+                if (countsChanged) {
+                    const freshPhotos = await fetchPhotos(selectedCollectionId)
+                    if (cancelled) return
+                    setPhotos(freshPhotos)
+                }
+
+                // The server may have sent the link (status change, access token) or the request was dropped.
+                const known = selectedCollectionRef.current
+                if (known?.id === selectedCollectionId) {
+                    if (known.status !== status.status) {
+                        const collectionResponse = await apiFetch(`/collections/${selectedCollectionId}`)
+                        if (collectionResponse.ok) {
+                            const freshCollection = await collectionResponse.json()
+                            if (cancelled) return
+                            replaceCollection(freshCollection)
+                        }
+                    } else if ((known.sendRequestedAt ?? null) !== (status.sendRequestedAt ?? null)) {
+                        replaceCollection({ ...known, sendRequestedAt: status.sendRequestedAt })
+                    }
+                }
+
+                keepPolling = status.queued + status.processing > 0 || Boolean(status.sendRequestedAt)
+                if (keepPolling) {
+                    timer = setTimeout(tick, PROCESSING_POLL_INTERVAL_MS)
+                }
+            } catch (error) {
+                console.error('Error polling the processing status:', error)
+                // A transient failure must not leave the placeholders stuck: keep trying, but
+                // only if the polling was already running.
+                if (!cancelled && keepPolling) {
+                    timer = setTimeout(tick, PROCESSING_POLL_INTERVAL_MS)
+                }
+            }
+        }
+
+        tick()
+        return () => {
+            cancelled = true
+            clearTimeout(timer)
+        }
+    }, [selectedCollectionId, pollNonce])
 
     // `groups` come from groupFilesForUpload (client-side basename grouping): each
     // group is either a new main photo (+ its CR2/XMP attachments) or an
@@ -212,7 +345,13 @@ export default function Gallery() {
             const { created: chunkCreated, failed: chunkFailed, failedAttachments: chunkFailedAttachments } = await confirmResponse.json()
             created.push(...chunkCreated)
             confirmFailures += chunkFailed.length + (chunkFailedAttachments?.length || 0)
-            setPhotos(current => [...current, ...chunkCreated])
+            // The polling may already have reloaded these photos: never add them twice.
+            setPhotos(current => {
+                const knownIds = new Set(current.map(photo => photo.id))
+                return [...current, ...chunkCreated.filter(photo => !knownIds.has(photo.id))]
+            })
+            // The new photos are processed in the background: (re)start the polling.
+            setPollNonce(nonce => nonce + 1)
 
             confirmed += chunk.length
             onProgress?.(fileEntries.length + confirmed, overallTotal)
@@ -332,7 +471,10 @@ export default function Gallery() {
                     collection={selectedCollection}
                     photos={photos}
                     loading={loadingPhotos}
-                    onBack={() => setSelectedCollection(null)}
+                    processing={processing}
+                    onBack={handleBack}
+                    onRetryPhoto={handleRetryPhoto}
+                    onCancelSendRequest={handleCancelSendRequest}
                     onAddPhotos={handleAddPhotos}
                     onDeletePhoto={handleDeletePhoto}
                     onDeleteDeliveredPhoto={handleDeleteDeliveredPhoto}
