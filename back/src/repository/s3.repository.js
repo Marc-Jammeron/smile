@@ -1,9 +1,7 @@
 import { S3Client, PutObjectCommand, GetObjectCommand, HeadObjectCommand, DeleteObjectCommand, DeleteObjectsCommand, ListObjectsV2Command } from "@aws-sdk/client-s3";
 import { Buffer } from "node:buffer";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
-import { randomUUID } from "node:crypto";
-import { collectToBuffer } from "../utils/stream-buffer.js";
-import { SIGNED_URL_TTL_SECONDS } from "../config/signed-urls.js";
+import { v4 as uuid } from "uuid";
 import logger from "../logger.js";
 
 const log = logger.child("s3");
@@ -41,11 +39,11 @@ const getSignedPutUrl = (key, contentType) => {
     });
 
     log.debug("Signing upload url", { key, contentType });
-    return getSignedUrl(s3, command, { expiresIn: SIGNED_URL_TTL_SECONDS.upload });
+    return getSignedUrl(s3, command, { expiresIn: 300 });
 };
 
 const getSignedUploadUrl = async (collectionId, filename, contentType) => {
-    const key = `uploads/${collectionId}/${randomUUID()}-${filename}`;
+    const key = `uploads/${collectionId}/${uuid()}-${filename}`;
     const url = await getSignedPutUrl(key, contentType);
     return { url, key };
 };
@@ -53,25 +51,25 @@ const getSignedUploadUrl = async (collectionId, filename, contentType) => {
 // Distinct path prefix from getSignedUploadUrl (`uploads/`) so attachment keys
 // can never collide with a Photo's own key.
 const getSignedAttachmentUploadUrl = async (collectionId, filename, contentType) => {
-    const key = `attachments/${collectionId}/${randomUUID()}-${filename}`;
+    const key = `attachments/${collectionId}/${uuid()}-${filename}`;
     const url = await getSignedPutUrl(key, contentType);
     return { url, key };
 };
 
 const getSignedBrandingUploadUrl = async (kind, contentType) => {
-    const key = `branding/${kind}/raw/${randomUUID()}`;
+    const key = `branding/${kind}/raw/${uuid()}`;
     const url = await getSignedPutUrl(key, contentType);
     return { url, key };
 };
 
-const getSignedDownloadUrl = async (key, { expiresIn = SIGNED_URL_TTL_SECONDS.default } = {}) => {
+const getSignedDownloadUrl = async (key) => {
     const command = new GetObjectCommand({
         Bucket: BUCKET,
         Key: key,
     });
 
-    log.debug("Signing download url", { key, expiresIn });
-    const url = await getSignedUrl(s3, command, { expiresIn });
+    log.debug("Signing download url", { key });
+    const url = await getSignedUrl(s3, command, { expiresIn: 300 });
     return url;
 };
 
@@ -81,8 +79,12 @@ const getObject = async (key) => {
         Key: key,
     });
 
-    const { Body, ContentLength } = await s3.send(command);
-    const buffer = await collectToBuffer(Body, ContentLength);
+    const { Body } = await s3.send(command);
+    const chunks = [];
+    for await (const chunk of Body) {
+        chunks.push(chunk);
+    }
+    const buffer = Buffer.concat(chunks);
     log.debug("Object downloaded", { key, bytes: buffer.length });
     return buffer;
 };
