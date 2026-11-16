@@ -1,5 +1,6 @@
 import logger from '../logger.js';
-import { getAllPhotosByCollectionId, getPhotoById, createPhotosBatch, confirmPhotosBatch, updatePhoto, updatePhotoSelectionStatus, softDeletePhoto, deleteDeliveredPhoto } from '../services/photo.service.js';
+import { wakeWorker } from '../services/photo-worker.service.js';
+import { getAllPhotosByCollectionId, getPhotoById, createPhotosBatch, confirmPhotosBatch, updatePhoto, updatePhotoSelectionStatus, softDeletePhoto, deleteDeliveredPhoto, retryPhotoProcessing } from '../services/photo.service.js';
 
 const log = logger.child('photo.controller');
 
@@ -50,6 +51,11 @@ export const confirmNewPhotosBatch = async (req, res) => {
             targetStatus
         });
         const result = await confirmPhotosBatch({ photos, attachmentsToExistingPhotos, targetStatus });
+        if (result.created.length > 0) {
+            // The derived images are generated in the background: start right away instead of
+            // waiting for the next poll (no-op when the worker runs in another process).
+            wakeWorker();
+        }
         const summary = {
             created: result.created.length,
             failed: result.failed.length,
@@ -130,5 +136,20 @@ export const deleteDeliveredPhotoById = async (req, res) => {
         }
     } catch (error) {
         res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed to delete delivered photo' });
+    }
+};
+
+export const retryPhotoProcessingById = async (req, res) => {
+    const { id } = req.params;
+    try {
+        const result = await retryPhotoProcessing(id);
+        if (!result) {
+            res.status(404).json({ error: 'Photo not found' });
+            return;
+        }
+        wakeWorker();
+        res.json(result);
+    } catch (error) {
+        res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed to retry photo processing' });
     }
 };

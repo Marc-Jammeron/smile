@@ -1,6 +1,5 @@
 import db from "../repository/db.repository.js";
 import s3Repository from "../repository/s3.repository.js";
-import { generateDerivedImages } from "./image-processing.service.js";
 import { isMainPhotoFilename, isBlacklistedFilename } from "./filename.util.js";
 import logger from "../logger.js";
 
@@ -44,8 +43,9 @@ const toClientPhotoDTO = async (photo) => {
         thumbnailKey ? s3Repository.getSignedDownloadUrl(thumbnailKey) : Promise.resolve(null),
         previewKey ? s3Repository.getSignedDownloadUrl(previewKey) : Promise.resolve(null)
     ]);
-    const { key, ...photoWithoutKey } = photo.toJSON();
-    return { ...photoWithoutKey, url, thumbnailUrl, previewUrl };
+    // The processing fields are admin-only bookkeeping (a client only ever sees DONE photos).
+    const { key, processingStatus, processingAttempts, processingStartedAt, processingError, ...clientPhoto } = photo.toJSON();
+    return { ...clientPhoto, url, thumbnailUrl, previewUrl };
 };
 
 export const getAllPhotosByCollectionId = async (collectionId) => {
@@ -71,6 +71,8 @@ export const getAllClientPhotosByCollectionId = async (collectionId) => {
             where: {
                 collectionId,
                 status: ['PENDING', 'SELECTED', 'REJECTED'],
+                // Photos still being processed have no thumbnail/preview yet.
+                processingStatus: 'DONE',
             },
             order: PHOTO_ORDER,
         });
@@ -174,7 +176,7 @@ const confirmAttachmentForExistingPhoto = async (attachmentData, photoId) => {
 };
 
 // Extension is checked here (not just at grouping time on the client) so a CR2
-// submitted as a main photo item can never reach generateDerivedImages/sharp.
+// submitted as a main photo item can never reach the image worker/sharp.
 const confirmPhoto = async (photoData, targetStatus, position) => {
     try {
         const { collectionId, key, contentType, size, description, filename, attachments = [] } = photoData;
@@ -200,11 +202,10 @@ const confirmPhoto = async (photoData, targetStatus, position) => {
             await assertCollectionAcceptsAttachments(collectionId);
         }
 
-        const { thumbnailKey, previewKey } = await generateDerivedImages(key, { watermark: targetStatus !== 'DELIVERED' });
-
-        log.debug("Derived images generated", { key, thumbnailKey, previewKey, watermarked: targetStatus !== 'DELIVERED' });
-
-        const newPhoto = await db.Photo.create({ collectionId, key, thumbnailKey, previewKey, contentType, size, description, originalFilename: filename, status: targetStatus, position });
+        // The derived images (thumbnail, preview) are generated afterwards by the photo
+        // worker: the row starts QUEUED, with no thumbnailKey/previewKey. The worker reads
+        // `status` to decide on the watermark (none for DELIVERED photos).
+        const newPhoto = await db.Photo.create({ collectionId, key, contentType, size, description, originalFilename: filename, status: targetStatus, position, processingStatus: 'QUEUED' });
 
         const attachmentResults = await Promise.allSettled(
             attachments.map((attachmentData) => confirmAttachment(attachmentData, newPhoto.id))
@@ -338,6 +339,33 @@ export const updatePhotoSelectionStatus = async (id, status) => {
     }
 };
 
+// FAILED -> QUEUED with a fresh attempt budget. Resolves to the photo's id/processingStatus,
+// or null when the photo does not exist; a photo in any other state is refused (409).
+export const retryPhotoProcessing = async (id) => {
+    try {
+        const [updatedRows] = await db.Photo.update(
+            { processingStatus: 'QUEUED', processingAttempts: 0, processingStartedAt: null },
+            { where: { id, processingStatus: 'FAILED' } }
+        );
+        if (updatedRows === 0) {
+            const photo = await db.Photo.findByPk(id);
+            if (!photo) {
+                log.debug("Photo to retry not found", { photoId: id });
+                return null;
+            }
+            log.warn("Retry refused: photo is not FAILED", { photoId: id, processingStatus: photo.processingStatus });
+            const error = new Error('Only photos whose processing FAILED can be retried');
+            error.status = 409;
+            throw error;
+        }
+        log.info("Photo processing retry requested", { photoId: id });
+        return { id: Number(id), processingStatus: 'QUEUED' };
+    } catch (error) {
+        log.failure("Error retrying photo processing", error, { photoId: id });
+        throw error;
+    }
+};
+
 export const getSelectedPhotosForCollection = async (collectionId) => {
     try {
         return await db.Photo.findAll({
@@ -426,6 +454,7 @@ export const getDeliveredPhotosByCollectionId = async (collectionId) => {
             where: {
                 collectionId,
                 status: 'DELIVERED',
+                processingStatus: 'DONE',
             },
             order: PHOTO_ORDER,
         });

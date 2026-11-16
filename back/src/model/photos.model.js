@@ -46,6 +46,26 @@ export default (sequelize, DataTypes) => {
             type: DataTypes.ENUM('PENDING', 'SELECTED', 'REJECTED', 'ARCHIVED', 'DELIVERED'),
             defaultValue: 'PENDING'
         },
+        // Asynchronous derived-image generation (independent from the business `status`).
+        // thumbnailKey / previewKey stay null until processingStatus is DONE.
+        processingStatus: {
+            type: DataTypes.ENUM('QUEUED', 'PROCESSING', 'DONE', 'FAILED'),
+            allowNull: false,
+            defaultValue: 'QUEUED'
+        },
+        processingAttempts: {
+            type: DataTypes.INTEGER,
+            allowNull: false,
+            defaultValue: 0
+        },
+        processingStartedAt: {
+            type: DataTypes.DATE,
+            allowNull: true
+        },
+        processingError: {
+            type: DataTypes.TEXT,
+            allowNull: true
+        },
         createdAt: {
             type: DataTypes.DATE,
             defaultValue: DataTypes.NOW

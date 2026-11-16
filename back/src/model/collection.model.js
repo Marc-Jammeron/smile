@@ -55,6 +55,12 @@ export default (sequelize, DataTypes) => {
         accessTokenRevokedAt: {
             type: DataTypes.DATE,
             allowNull: true
+        },
+        // Set when the photographer asks for the client link while photos are still being
+        // processed; the worker performs the DRAFT -> SELECTING transition once all are DONE.
+        sendRequestedAt: {
+            type: DataTypes.DATE,
+            allowNull: true
         }
     });
 }

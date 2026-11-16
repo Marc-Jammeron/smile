@@ -10,6 +10,8 @@ let currentSelectedPhotos = [];
 let currentDeliveredPhotos = [];
 let currentNonDeliveredPhotos = [];
 let currentDeliveredCount = 0;
+let currentUnprocessedDeliveredCount = 0;
+let currentProcessingRows = [];
 let destroyedWhere = null;
 let collectionUpdateCalls = [];
 let deletedS3Keys = [];
@@ -54,12 +56,14 @@ mock.module('../src/repository/db.repository.js', {
             findAll: async (options) => {
                 const { where } = options;
                 photoFindAllOptions.push(options);
+                if (options.raw) return currentProcessingRows;
                 if (!('status' in where)) return currentCollectionPhotos;
                 if (where.status === 'SELECTED') return currentSelectedPhotos;
                 if (where.status === 'DELIVERED') return currentDeliveredPhotos;
                 return currentNonDeliveredPhotos; // { [Op.ne]: 'DELIVERED' } case
             },
-            count: async () => currentDeliveredCount,
+            // The processingStatus filter is the "delivered but not DONE" guard of markCollectionAsReady.
+            count: async ({ where }) => ('processingStatus' in where ? currentUnprocessedDeliveredCount : currentDeliveredCount),
             destroy: async ({ where }) => {
                 destroyedWhere = where;
                 return currentNonDeliveredPhotos.length;
@@ -72,6 +76,8 @@ mock.module('../src/repository/db.repository.js', {
             },
         },
         sequelize: {
+            fn: (name, column) => ({ fn: name, column }),
+            col: (name) => ({ col: name }),
             transaction: async (callback) => {
                 transactionInvoked = true;
                 return callback({});
@@ -107,7 +113,7 @@ mock.module('../src/services/image-processing.service.js', {
     },
 });
 
-const { streamSelectionHdZip, markCollectionAsReady, streamDeliveredZip, getAllCollections, getCollectionById, createCollection, updateCollection, pickCollectionFields, UPDATABLE_COLLECTION_FIELDS, ALLOWED_STATUS_TRANSITIONS, deleteCollection, CLIENT_MESSAGE_MAX_LENGTH } = await import('../src/services/collection.service.js');
+const { streamSelectionHdZip, markCollectionAsReady, streamDeliveredZip, getAllCollections, getCollectionById, createCollection, updateCollection, pickCollectionFields, UPDATABLE_COLLECTION_FIELDS, ALLOWED_STATUS_TRANSITIONS, deleteCollection, CLIENT_MESSAGE_MAX_LENGTH, getCollectionProcessingStatus } = await import('../src/services/collection.service.js');
 
 // Minimal stand-in for an Express `res`: a writable sink that flips `headersSent`
 // on the first chunk, mirroring how a real http.ServerResponse behaves once
@@ -590,4 +596,59 @@ test('getCollectionById and getAllCollections order the included photos by posit
         assert.deepEqual(order.map(([, column, direction]) => [column, direction]), POSITION_ORDER);
     }
     assert.equal(collectionFindOptions.length, 2);
+});
+
+test('markCollectionAsReady throws 409 while delivered photos are not all processed', async () => {
+    currentCollection = { id: 'col-1', name: 'Mariage Dupont', status: 'EDITING', accessToken: null };
+    currentDeliveredCount = 3;
+    currentUnprocessedDeliveredCount = 1;
+    transactionInvoked = false;
+    collectionUpdateCalls = [];
+
+    await assert.rejects(
+        () => markCollectionAsReady('col-1'),
+        (error) => {
+            assert.equal(error.status, 409);
+            assert.match(error.message, /traitées/);
+            return true;
+        }
+    );
+    assert.equal(transactionInvoked, false, 'nothing may be deleted while photos are still processed');
+    assert.equal(collectionUpdateCalls.length, 0);
+    currentUnprocessedDeliveredCount = 0;
+});
+
+test('markCollectionAsReady goes through once every delivered photo is processed', async () => {
+    currentCollection = { id: 'col-1', name: 'Mariage Dupont', status: 'EDITING', accessToken: 'token' };
+    currentDeliveredCount = 3;
+    currentUnprocessedDeliveredCount = 0;
+    currentNonDeliveredPhotos = [];
+
+    await markCollectionAsReady('col-1');
+
+    assert.ok(transactionInvoked);
+});
+
+test('getCollectionProcessingStatus returns the counters (zero-filled), the status and sendRequestedAt', async () => {
+    const requestedAt = new Date('2026-11-16T10:00:00Z');
+    currentCollection = { id: 'col-1', status: 'DRAFT', sendRequestedAt: requestedAt };
+    currentProcessingRows = [
+        { processingStatus: 'DONE', count: '12' },
+        { processingStatus: 'QUEUED', count: '3' },
+        { processingStatus: 'FAILED', count: '1' },
+    ];
+    photoFindAllOptions = [];
+
+    const status = await getCollectionProcessingStatus('col-1');
+
+    assert.deepEqual(status, { queued: 3, processing: 0, done: 12, failed: 1, status: 'DRAFT', sendRequestedAt: requestedAt });
+    // Soft-deleted photos must not count.
+    const { where } = photoFindAllOptions.at(-1);
+    assert.equal(where.collectionId, 'col-1');
+    assert.ok(Object.getOwnPropertySymbols(where.status).length === 1, 'ARCHIVED photos are excluded');
+});
+
+test('getCollectionProcessingStatus returns null for an unknown collection', async () => {
+    currentCollection = null;
+    assert.equal(await getCollectionProcessingStatus('missing'), null);
 });

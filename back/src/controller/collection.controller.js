@@ -1,5 +1,7 @@
 import logger from '../logger.js';
-import { getAllCollections, getCollectionById, createCollection, updateCollection, pickCollectionFields, UPDATABLE_COLLECTION_FIELDS, deleteCollection, revokeCollectionAccess, streamSelectionHdZip, markCollectionAsReady } from '../services/collection.service.js';
+import { getAllCollections, getCollectionById, createCollection, pickCollectionFields, UPDATABLE_COLLECTION_FIELDS, deleteCollection, revokeCollectionAccess, getCollectionProcessingStatus, streamSelectionHdZip, markCollectionAsReady } from '../services/collection.service.js';
+
+import { updateCollectionOrDeferSend, cancelSendRequest, SEND_DEFERRED_MESSAGE } from '../services/collection-send.service.js';
 
 const log = logger.child('collection.controller');
 
@@ -29,6 +31,21 @@ export const getCollectionByIdController = async (req, res) => {
     }
 };
 
+export const getCollectionProcessingStatusController = async (req, res) => {
+    const { id } = req.params;
+    try {
+        const status = await getCollectionProcessingStatus(id);
+        if (status) {
+            res.json(status);
+        } else {
+            log.warn('Collection of the processing status not found', { collectionId: id });
+            res.status(404).json({ error: 'Collection not found' });
+        }
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to fetch the processing status' });
+    }
+};
+
 export const createNewCollectionController = async (req, res) => {
     try {
         const newCollection = await createCollection(req.body);
@@ -47,10 +64,15 @@ export const updateExistingCollectionController = async (req, res) => {
             log.warn('Collection update refused: no updatable field in the payload', { collectionId: id, received: Object.keys(req.body ?? {}) });
             return res.status(400).json({ error: 'No updatable field provided' });
         }
-        const updated = await updateCollection(id, changes);
+        const { collection: updated, deferred } = await updateCollectionOrDeferSend(id, changes);
         if (updated) {
-            log.info('Collection updated', { collectionId: id, fields: Object.keys(req.body ?? {}), status: updated.status });
-            res.json(updated);
+            log.info('Collection updated', { collectionId: id, fields: Object.keys(req.body ?? {}), status: updated.status, sendDeferred: deferred });
+            if (deferred) {
+                // Photos are still being processed: the link is sent automatically afterwards.
+                res.status(202).json({ message: SEND_DEFERRED_MESSAGE, collection: updated });
+            } else {
+                res.json(updated);
+            }
         } else {
             log.warn('Collection to update not found', { collectionId: id });
             res.status(404).json({ error: 'Collection not found' });
@@ -102,6 +124,22 @@ export const markCollectionAsReadyController = async (req, res) => {
     } catch (error) {
         log.failure('Failed to mark collection as ready', error, { collectionId: id });
         res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed to mark collection as ready' });
+    }
+};
+
+export const cancelSendRequestController = async (req, res) => {
+    const { id } = req.params;
+    try {
+        const collection = await cancelSendRequest(id);
+        if (collection) {
+            res.json(collection);
+        } else {
+            log.warn('Collection of the send request to cancel not found', { collectionId: id });
+            res.status(404).json({ error: 'Collection not found' });
+        }
+    } catch (error) {
+        log.failure('Failed to cancel the send request', error, { collectionId: id });
+        res.status(500).json({ error: 'Failed to cancel the send request' });
     }
 };
 

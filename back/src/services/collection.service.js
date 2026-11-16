@@ -34,6 +34,31 @@ export const getCollectionById = async (id) => {
     }
 };
 
+// Counters for the admin polling. Archived photos (soft-deleted) are ignored.
+// Resolves to null when the collection does not exist.
+export const getCollectionProcessingStatus = async (id) => {
+    try {
+        const collection = await db.Collection.findByPk(id, { attributes: ['id', 'status', 'sendRequestedAt'] });
+        if (!collection) {
+            return null;
+        }
+        const rows = await db.Photo.findAll({
+            where: { collectionId: id, status: { [Op.ne]: 'ARCHIVED' } },
+            attributes: ['processingStatus', [db.sequelize.fn('COUNT', db.sequelize.col('id')), 'count']],
+            group: ['processingStatus'],
+            raw: true
+        });
+        const counts = { queued: 0, processing: 0, done: 0, failed: 0 };
+        for (const { processingStatus, count } of rows) {
+            counts[processingStatus.toLowerCase()] = Number(count);
+        }
+        return { ...counts, status: collection.status, sendRequestedAt: collection.sendRequestedAt };
+    } catch (error) {
+        log.failure("Error fetching collection processing status", error, { collectionId: id });
+        throw error;
+    }
+};
+
 // A new collection can only start as a DRAFT or straight in EDITING (final photos
 // uploaded directly, no client selection). SELECTING needs the access token and the
 // photos to be set up, READY needs delivered photos and ARCHIVED is an end state: all
@@ -339,6 +364,14 @@ export const markCollectionAsReady = async (id) => {
     if (deliveredCount === 0) {
         const error = new Error('Au moins une photo livrée est requise pour marquer la collection comme prête.');
         error.status = 400;
+        throw error;
+    }
+
+    const unprocessedDeliveredCount = await db.Photo.count({ where: { collectionId: id, status: 'DELIVERED', processingStatus: { [Op.ne]: 'DONE' } } });
+    if (unprocessedDeliveredCount > 0) {
+        log.warn("Mark as ready refused: delivered photos are not all processed", { collectionId: id, unprocessedDeliveredCount });
+        const error = new Error('Toutes les photos livrées doivent être traitées avant de marquer la collection comme prête.');
+        error.status = 409;
         throw error;
     }
 
