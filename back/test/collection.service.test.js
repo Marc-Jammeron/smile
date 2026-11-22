@@ -1,6 +1,5 @@
 import { test, mock } from 'node:test';
 import assert from 'node:assert/strict';
-import { Writable, Readable } from 'node:stream';
 
 // collection.service.js imports db.repository.js (real Postgres connection as a module
 // side effect) and photo.service.js (which itself imports db/s3/image-processing), so
@@ -89,12 +88,6 @@ mock.module('../src/repository/db.repository.js', {
 mock.module('../src/repository/s3.repository.js', {
     defaultExport: {
         getSignedDownloadUrl: async (key) => `https://s3.example.com/signed?key=${encodeURIComponent(key)}`,
-        getObjectStream: async (key) => {
-            if (key === 'originals/broken.jpg') {
-                throw new Error('S3 object not found');
-            }
-            return Readable.from([Buffer.from(`content-of-${key}`)]);
-        },
         deleteObject: async (key) => {
             if (key === failingS3Key) throw new Error('S3 unavailable');
             deletedS3Keys.push(key);
@@ -113,134 +106,23 @@ mock.module('../src/services/image-processing.service.js', {
     },
 });
 
-const { streamSelectionHdZip, markCollectionAsReady, streamDeliveredZip, getAllCollections, getCollectionById, createCollection, updateCollection, pickCollectionFields, UPDATABLE_COLLECTION_FIELDS, ALLOWED_STATUS_TRANSITIONS, deleteCollection, CLIENT_MESSAGE_MAX_LENGTH, getCollectionProcessingStatus } = await import('../src/services/collection.service.js');
-
-// Minimal stand-in for an Express `res`: a writable sink that flips `headersSent`
-// on the first chunk, mirroring how a real http.ServerResponse behaves once
-// archive.pipe(res) starts pushing bytes.
-class FakeResponse extends Writable {
-    constructor() {
-        super();
-        this.headers = {};
-        this.headersSent = false;
-        this.chunks = [];
-    }
-    setHeader(key, value) {
-        this.headers[key] = value;
-    }
-    _write(chunk, _encoding, callback) {
-        this.headersSent = true;
-        this.chunks.push(chunk);
-        callback();
-    }
-}
-
-test('streamSelectionHdZip throws 404 when the collection does not exist', async () => {
-    currentCollection = null;
-    const res = new FakeResponse();
-
-    await assert.rejects(
-        () => streamSelectionHdZip('missing-collection', res),
-        (error) => {
-            assert.equal(error.status, 404);
-            return true;
-        }
-    );
-    assert.equal(res.headersSent, false);
+// The ZIP side (rows, S3 files, worker) is tested in collection-archive.service.test.js:
+// here only the calls made by the collection lifecycle are recorded.
+let archiveCalls = [];
+let failingArchiveCall = null;
+const recordArchiveCall = (name) => async (...args) => {
+    archiveCalls.push([name, ...args]);
+    if (failingArchiveCall === name) throw new Error(`${name} failed`);
+};
+mock.module('../src/services/collection-archive.service.js', {
+    namedExports: {
+        refreshArchive: recordArchiveCall('refreshArchive'),
+        discardArchives: recordArchiveCall('discardArchives'),
+        deleteArchivesForCollection: recordArchiveCall('deleteArchivesForCollection'),
+    },
 });
 
-test('streamSelectionHdZip throws 409 when the collection is not in EDITING status', async () => {
-    currentCollection = { id: 'col-1', name: 'Mariage Dupont', status: 'SELECTING' };
-    const res = new FakeResponse();
-
-    await assert.rejects(
-        () => streamSelectionHdZip('col-1', res),
-        (error) => {
-            assert.equal(error.status, 409);
-            assert.match(error.message, /phase Retouche/);
-            return true;
-        }
-    );
-    assert.equal(res.headersSent, false);
-});
-
-test('streamSelectionHdZip throws 400 when no photo is SELECTED', async () => {
-    currentCollection = { id: 'col-1', name: 'Mariage Dupont', status: 'EDITING' };
-    currentSelectedPhotos = [];
-    const res = new FakeResponse();
-
-    await assert.rejects(
-        () => streamSelectionHdZip('col-1', res),
-        (error) => {
-            assert.equal(error.status, 400);
-            assert.match(error.message, /Aucune photo sélectionnée/);
-            return true;
-        }
-    );
-    assert.equal(res.headersSent, false);
-});
-
-test('streamSelectionHdZip streams a zip with the right headers when the collection is ready', async () => {
-    currentCollection = { id: 'col-1', name: 'Mariage Dupont', status: 'EDITING' };
-    currentSelectedPhotos = [
-        { id: 1, key: 'originals/photo-1.jpg', originalFilename: 'IMG_0001.jpg' },
-    ];
-    const res = new FakeResponse();
-
-    await streamSelectionHdZip('col-1', res);
-
-    assert.equal(res.headers['Content-Type'], 'application/zip');
-    assert.match(res.headers['Content-Disposition'], /attachment; filename="mariage-dupont-HD-\d{8}\.zip"/);
-    assert.ok(res.headersSent, 'expected the zip bytes to have been written to the response');
-    assert.ok(res.chunks.length > 0, 'expected at least one chunk of zip data');
-});
-
-test('streamSelectionHdZip skips a photo whose original is missing in storage without failing the whole zip', async () => {
-    currentCollection = { id: 'col-1', name: 'Mariage Dupont', status: 'EDITING' };
-    currentSelectedPhotos = [
-        { id: 1, key: 'originals/broken.jpg', originalFilename: 'IMG_0001.jpg' },
-        { id: 2, key: 'originals/photo-2.jpg', originalFilename: 'IMG_0002.jpg' },
-    ];
-    const res = new FakeResponse();
-
-    await streamSelectionHdZip('col-1', res);
-
-    assert.ok(res.chunks.length > 0, 'expected the zip to still be produced for the remaining photo');
-});
-
-test('streamSelectionHdZip zips a photo\'s attachments instead of its JPEG when attachments exist', async () => {
-    currentCollection = { id: 'col-1', name: 'Mariage Dupont', status: 'EDITING' };
-    currentSelectedPhotos = [
-        { id: 1, key: 'originals/photo-1.jpg', originalFilename: 'IMG_0001.jpg' },
-    ];
-    currentAttachmentsByPhotoId = {
-        1: [
-            { id: 'a1', photoId: 1, s3Key: 'attachments/col-1/uuid-IMG_0001.CR2', originalFilename: 'IMG_0001.CR2' },
-            { id: 'a2', photoId: 1, s3Key: 'attachments/col-1/uuid-IMG_0001.xmp', originalFilename: 'IMG_0001.xmp' },
-        ],
-    };
-    const res = new FakeResponse();
-
-    await streamSelectionHdZip('col-1', res);
-
-    assert.ok(res.chunks.length > 0, 'expected the zip to contain the attachments');
-    currentAttachmentsByPhotoId = {};
-});
-
-test('streamSelectionHdZip adds a _erreurs.txt entry (without aborting the stream) when a file fails partway through', async () => {
-    currentCollection = { id: 'col-1', name: 'Mariage Dupont', status: 'EDITING' };
-    currentSelectedPhotos = [
-        { id: 1, key: 'originals/broken.jpg', originalFilename: 'IMG_0001.jpg' },
-        { id: 2, key: 'originals/photo-2.jpg', originalFilename: 'IMG_0002.jpg' },
-    ];
-    currentAttachmentsByPhotoId = {};
-    const res = new FakeResponse();
-
-    await streamSelectionHdZip('col-1', res);
-
-    const zipContent = Buffer.concat(res.chunks).toString('latin1');
-    assert.ok(zipContent.includes('_erreurs.txt'), 'expected an _erreurs.txt entry to be added to the zip for the failed file');
-});
+const { markCollectionAsReady, getAllCollections, getCollectionById, createCollection, updateCollection, pickCollectionFields, UPDATABLE_COLLECTION_FIELDS, ALLOWED_STATUS_TRANSITIONS, deleteCollection, CLIENT_MESSAGE_MAX_LENGTH, getCollectionProcessingStatus } = await import('../src/services/collection.service.js');
 
 test('markCollectionAsReady throws 409 when the collection is not in EDITING status', async () => {
     currentCollection = { id: 'col-1', name: 'Mariage Dupont', status: 'READY' };
@@ -342,32 +224,7 @@ test('markCollectionAsReady also deletes the S3 objects of attachments belonging
     currentAttachmentsByPhotoId = {};
 });
 
-test('streamDeliveredZip throws 409 when the collection is not READY', async () => {
-    const res = new FakeResponse();
 
-    await assert.rejects(
-        () => streamDeliveredZip({ id: 'col-1', name: 'Mariage Dupont', status: 'EDITING' }, res),
-        (error) => {
-            assert.equal(error.status, 409);
-            return true;
-        }
-    );
-    assert.equal(res.headersSent, false);
-});
-
-test('streamDeliveredZip streams only the DELIVERED photos of the requested collection', async () => {
-    currentDeliveredPhotos = [
-        { id: 10, key: 'uploads/col-1/final-1.jpg', originalFilename: 'FINAL_0001.jpg' },
-        { id: 11, key: 'uploads/col-1/final-2.jpg', originalFilename: 'FINAL_0002.jpg' },
-    ];
-    const res = new FakeResponse();
-
-    await streamDeliveredZip({ id: 'col-1', name: 'Mariage Dupont', status: 'READY' }, res);
-
-    assert.equal(res.headers['Content-Type'], 'application/zip');
-    assert.ok(res.headersSent, 'expected the zip bytes to have been written to the response');
-    assert.ok(res.chunks.length > 0, 'expected at least one chunk of zip data');
-});
 
 test('createCollection accepts the DRAFT and EDITING statuses and defaults when no status is given', async () => {
     for (const status of ['DRAFT', 'EDITING']) {
@@ -515,6 +372,7 @@ test('updateCollection leaves clientMessage untouched when it is not in the payl
 
 
 test('deleteCollection removes every S3 object, sweeps the prefixes, then deletes the row', async () => {
+    archiveCalls = [];
     currentCollection = { id: 'c1', status: 'READY' };
     currentCollectionPhotos = [
         { id: 1, key: 'uploads/c1/a.jpg', thumbnailKey: 'uploads/c1/a-thumb.jpg', previewKey: 'uploads/c1/a-preview.jpg' },
@@ -537,6 +395,7 @@ test('deleteCollection removes every S3 object, sweeps the prefixes, then delete
     ]);
     assert.deepEqual(deletedPrefixes, ['uploads/c1/', 'attachments/c1/']);
     assert.deepEqual(destroyedCollectionWhere, { id: 'c1' });
+    assert.deepEqual(archiveCalls, [['deleteArchivesForCollection', 'c1']], 'the pre-generated ZIPs go with the collection');
 });
 
 test('deleteCollection returns false and touches nothing when the collection does not exist', async () => {
@@ -566,24 +425,7 @@ test('deleteCollection keeps the DB row when an S3 deletion fails, so it can be 
 
 const POSITION_ORDER = [['position', 'ASC'], ['id', 'ASC']];
 
-test('streamSelectionHdZip lists the SELECTED photos by position', async () => {
-    currentCollection = { id: 'col-1', name: 'Mariage Dupont', status: 'EDITING' };
-    currentSelectedPhotos = [{ id: 1, key: 'originals/photo-1.jpg', originalFilename: 'IMG_0001.jpg' }];
-    photoFindAllOptions = [];
 
-    await streamSelectionHdZip('col-1', new FakeResponse());
-
-    assert.deepEqual(photoFindAllOptions[0].order, POSITION_ORDER);
-});
-
-test('streamDeliveredZip lists the DELIVERED photos by position', async () => {
-    currentDeliveredPhotos = [{ id: 10, key: 'uploads/col-1/final-1.jpg', originalFilename: 'FINAL_0001.jpg' }];
-    photoFindAllOptions = [];
-
-    await streamDeliveredZip({ id: 'col-1', name: 'Mariage Dupont', status: 'READY' }, new FakeResponse());
-
-    assert.deepEqual(photoFindAllOptions[0].order, POSITION_ORDER);
-});
 
 test('getCollectionById and getAllCollections order the included photos by position', async () => {
     currentCollection = { id: 'col-1' };
@@ -651,4 +493,75 @@ test('getCollectionProcessingStatus returns the counters (zero-filled), the stat
 test('getCollectionProcessingStatus returns null for an unknown collection', async () => {
     currentCollection = null;
     assert.equal(await getCollectionProcessingStatus('missing'), null);
+});
+
+// --- pre-generated ZIPs follow the lifecycle ---------------------------------------------------
+
+const resetArchiveCalls = () => {
+    archiveCalls = [];
+    failingArchiveCall = null;
+};
+
+test('a collection entering EDITING queues the retouching ZIP', async () => {
+    resetArchiveCalls();
+    currentCollection = { id: 'col-1', status: 'SELECTING', accessToken: 'tok' };
+    await updateCollection('col-1', { status: 'EDITING' });
+    assert.deepEqual(archiveCalls, [['refreshArchive', 'col-1', 'SELECTION_HD']]);
+});
+
+test('a collection that is already EDITING does not requeue the ZIP on a no-op status change', async () => {
+    resetArchiveCalls();
+    currentCollection = { id: 'col-1', status: 'EDITING' };
+    await updateCollection('col-1', { status: 'EDITING' });
+    assert.deepEqual(archiveCalls, []);
+});
+
+test('other status changes touch no ZIP', async () => {
+    resetArchiveCalls();
+    currentCollection = { id: 'col-1', status: 'DRAFT' };
+    await updateCollection('col-1', { status: 'SELECTING' });
+    await updateCollection('col-1', { name: 'Renamed' });
+    assert.deepEqual(archiveCalls, []);
+});
+
+test('archiving a collection removes its ZIPs, and repeating the request cleans up again', async () => {
+    resetArchiveCalls();
+    currentCollection = { id: 'col-1', status: 'READY' };
+    await updateCollection('col-1', { status: 'ARCHIVED' });
+    assert.deepEqual(archiveCalls, [['discardArchives', 'col-1']]);
+
+    resetArchiveCalls();
+    currentCollection = { id: 'col-1', status: 'ARCHIVED' };
+    await updateCollection('col-1', { status: 'ARCHIVED' });
+    assert.deepEqual(archiveCalls, [['discardArchives', 'col-1']]);
+});
+
+test('marking a collection READY drops the retouching ZIP, then queues the delivered one once the purge is done', async () => {
+    resetArchiveCalls();
+    currentCollection = { id: 'col-1', name: 'Mariage', status: 'EDITING' };
+    currentDeliveredCount = 2;
+    currentUnprocessedDeliveredCount = 0;
+    currentNonDeliveredPhotos = [{ id: 1, key: 'uploads/col-1/a.jpg', thumbnailKey: null, previewKey: null, status: 'PENDING' }];
+    deletedS3Keys = [];
+    const callsWhenOriginalsWereDeleted = [];
+    const original = deletedS3Keys.push;
+    deletedS3Keys.push = function (...keys) { callsWhenOriginalsWereDeleted.push([...archiveCalls]); return original.apply(this, keys); };
+
+    await markCollectionAsReady('col-1');
+
+    assert.deepEqual(archiveCalls, [['discardArchives', 'col-1', ['SELECTION_HD']], ['refreshArchive', 'col-1', 'DELIVERED']]);
+    assert.deepEqual(callsWhenOriginalsWereDeleted, [[]], 'the ZIPs are only touched after the purge of the originals');
+});
+
+
+test('deleting a collection whose ZIP cleanup fails keeps the row, so it can be retried', async () => {
+    resetArchiveCalls();
+    currentCollection = { id: 'c1', status: 'READY' };
+    currentCollectionPhotos = [];
+    currentAttachmentsByPhotoId = {};
+    destroyedCollectionWhere = null;
+    failingArchiveCall = 'deleteArchivesForCollection';
+    await assert.rejects(() => deleteCollection('c1'), /deleteArchivesForCollection failed/);
+    assert.equal(destroyedCollectionWhere, null);
+    failingArchiveCall = null;
 });

@@ -1,5 +1,6 @@
 import { S3Client, PutObjectCommand, GetObjectCommand, HeadObjectCommand, DeleteObjectCommand, DeleteObjectsCommand, ListObjectsV2Command } from "@aws-sdk/client-s3";
 import { Buffer } from "node:buffer";
+import { Upload } from "@aws-sdk/lib-storage";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { v4 as uuid } from "uuid";
 import logger from "../logger.js";
@@ -82,6 +83,28 @@ const downloadUrlCache = createPresignedUrlCache({ ttlMs: SIGNED_URL_CACHE_TTL_M
 // Same URL for the same key during SIGNED_URL_CACHE_TTL_MS (see presigned-url-cache.js).
 const getSignedDownloadUrl = (key) => downloadUrlCache.get(key, signDownloadUrl);
 
+// RFC 5987 / 6266: encodeURIComponent leaves ' ( ) * alone, which are not allowed unescaped
+// in an ext-value.
+const encodeContentDispositionFilename = (filename) => encodeURIComponent(filename)
+    .replace(/['()*]/g, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
+
+// Presigned URL for a pre-generated ZIP. ResponseContentDisposition makes the browser
+// download the file instead of opening it, under `filename`. Deliberately not cached
+// (unlike getSignedDownloadUrl): the filename is part of the signature and a download
+// link is requested rarely, on a click. S3 only checks the signature when the request
+// starts, so the short expiry never interrupts a download already under way.
+const getSignedArchiveDownloadUrl = (key, filename) => {
+    const command = new GetObjectCommand({
+        Bucket: BUCKET,
+        Key: key,
+        ResponseContentType: "application/zip",
+        ResponseContentDisposition: `attachment; filename*=UTF-8''${encodeContentDispositionFilename(filename)}`,
+    });
+
+    log.debug("Signing archive download url", { key, filename });
+    return getSignedUrl(s3, command, { expiresIn: SIGNED_URL_EXPIRES_IN_S });
+};
+
 const getObject = async (key) => {
     const command = new GetObjectCommand({
         Bucket: BUCKET,
@@ -121,6 +144,21 @@ const putObject = async (key, body, contentType) => {
     downloadUrlCache.invalidate(key);
     log.debug("Object stored", { key, contentType, bytes: Buffer.isBuffer(body) ? body.length : undefined });
     return key;
+};
+
+// Multipart upload of a stream of unknown length (the ZIP being built). Memory stays
+// bounded to about partSize x queueSize. Returns the lib-storage `Upload`: the caller
+// awaits `done()`, and calls `abort()` on failure or shutdown to remove the parts already
+// sent (otherwise they would be billed until the bucket's lifecycle rule drops them).
+// Nothing is sent before `done()` is called.
+const createStreamUpload = (key, body, { contentType = "application/octet-stream", partSizeBytes, queueSize = 2 } = {}) => {
+    log.debug("Starting multipart upload", { key, contentType, partSizeBytes, queueSize });
+    return new Upload({
+        client: s3,
+        params: { Bucket: BUCKET, Key: key, Body: body, ContentType: contentType },
+        partSize: partSizeBytes,
+        queueSize,
+    });
 };
 
 const objectExists = async (key) => {
@@ -219,9 +257,11 @@ const s3Repository = {
     getSignedAttachmentUploadUrl,
     getSignedBrandingUploadUrl,
     getSignedDownloadUrl,
+    getSignedArchiveDownloadUrl,
     getObject,
     getObjectStream,
     putObject,
+    createStreamUpload,
     objectExists,
     headObject,
     deleteObject,

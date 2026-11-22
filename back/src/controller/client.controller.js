@@ -1,5 +1,6 @@
 import { getAllClientPhotosByCollectionId, getDeliveredPhotosByCollectionId, updatePhotoSelectionStatus } from '../services/photo.service.js';
-import { markCollectionAsViewed, streamDeliveredZip } from '../services/collection.service.js';
+import { markCollectionAsViewed } from '../services/collection.service.js';
+import { requestDeliveredDownload, toDownloadResponse, getClientArchiveInfo } from '../services/collection-archive.service.js';
 import { validateCollectionSelection } from '../services/client.service.js';
 import { getClientBranding } from '../services/settings.service.js';
 import logger from '../logger.js';
@@ -22,27 +23,52 @@ export const getClientGallery = async (req, res) => {
         } catch (error) {
             log.error('Failed to load client branding, serving the gallery without it', error, { collectionId });
         }
-        log.debug('Client gallery served', { collectionId, status, photoCount: photos.length, hasBranding: branding !== null });
-        res.json({ collection: req.collection, photos, photographerName: process.env.PHOTOGRAPHER_DISPLAY_NAME || null, branding });
+        // The state of the "download all" button, without an extra request from the client.
+        let archive = null;
+        if (status === 'READY') {
+            try {
+                archive = await getClientArchiveInfo(collectionId);
+            } catch (error) {
+                log.error('Failed to read the archive status, serving the gallery without it', error, { collectionId });
+            }
+        }
+        log.debug('Client gallery served', { collectionId, status, photoCount: photos.length, hasBranding: branding !== null, archiveStatus: archive?.status ?? null });
+        res.json({ collection: req.collection, photos, photographerName: process.env.PHOTOGRAPHER_DISPLAY_NAME || null, branding, ...(status === 'READY' && { archive }) });
     } catch (error) {
         log.error('Failed to fetch client gallery', error, { collectionId });
         res.status(500).json({ error: 'Failed to fetch gallery' });
     }
 };
 
+// The delivered ZIP is built in the background: 200 { url } once it is ready (the client then
+// navigates to it), 202 while it is being prepared, 409 when it failed. The token is the only
+// credential: the URL is never part of the gallery payload, it is returned on request.
 export const downloadAllDeliveredPhotos = async (req, res) => {
     const collectionId = req.collection.id;
     try {
         log.info('Client requested the delivered photos ZIP', { collectionId });
-        await streamDeliveredZip(req.collection, res);
-        log.info('Delivered photos ZIP sent', { collectionId });
+        const result = await requestDeliveredDownload(req.collection);
+        const { httpStatus, body } = toDownloadResponse('DELIVERED', result);
+        log.info('Delivered photos ZIP request answered', { collectionId, state: result.state, httpStatus });
+        res.status(httpStatus).json(body);
     } catch (error) {
-        if (res.headersSent) {
-            log.error('Delivered ZIP failed after streaming started', error, { collectionId });
-            return;
-        }
-        log.failure('Failed to generate the delivered photos ZIP', error, { collectionId });
-        res.status(error.status || 500).json({ error: error.status ? error.message : 'Erreur lors de la génération du ZIP' });
+        log.failure('Failed to answer the delivered photos ZIP request', error, { collectionId });
+        res.status(error.status || 500).json({ error: error.status ? error.message : 'Erreur lors de la préparation du ZIP' });
+    }
+};
+
+// Light read for the polling of the "download all" button (the gallery itself is too heavy to
+// reload every few seconds). Same answer as download-all outside READY: nothing is there.
+export const getClientArchive = async (req, res) => {
+    const collectionId = req.collection.id;
+    if (req.collection.status !== 'READY') {
+        return res.status(404).json({ error: 'Not found' });
+    }
+    try {
+        res.json({ archive: await getClientArchiveInfo(collectionId) });
+    } catch (error) {
+        log.error('Failed to read the archive status', error, { collectionId });
+        res.status(500).json({ error: 'Failed to read the archive status' });
     }
 };
 

@@ -25,3 +25,27 @@ export const isBlacklistedFilename = (filename, size) => {
     }
     return BLACKLISTED_BASENAMES.has(basename.toLowerCase());
 };
+
+const stripDiacritics = (value) => Array.from(value.normalize('NFD'))
+    .filter((char) => {
+        const codePoint = char.codePointAt(0);
+        return codePoint < 0x0300 || codePoint > 0x036f; // combining diacritical marks block
+    })
+    .join('');
+
+export const slugifyCollectionName = (name) => {
+    const slug = stripDiacritics(name ?? '')
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/(^-+|-+$)/g, '');
+    return slug || 'collection';
+};
+
+// Name under which the browser saves a downloaded ZIP: `<collection>-HD-<yyyymmdd>.zip` for
+// the retouching selection, `<collection>-<yyyymmdd>.zip` for the delivered photos. The date
+// is the day of the download (it is computed when the presigned URL is requested).
+export const archiveDownloadFilename = (collectionName, kind, now = new Date()) => {
+    const date = now.toISOString().slice(0, 10).replace(/-/g, '');
+    const suffix = kind === 'SELECTION_HD' ? '-HD' : '';
+    return `${slugifyCollectionName(collectionName)}${suffix}-${date}.zip`;
+};

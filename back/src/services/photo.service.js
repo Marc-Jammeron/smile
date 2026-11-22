@@ -491,7 +491,8 @@ export const deleteDeliveredPhoto = async (id) => {
         // attachment rows; only their S3 objects needed collecting above.
         await db.Photo.destroy({ where: { id } });
         log.info("Delivered photo and its files deleted", { photoId: id, collectionId: photo.collectionId, deletedObjects: keys.length });
-        return true;
+        // The collection is needed by the caller to refresh the delivered ZIP.
+        return { collectionId: photo.collectionId };
     } catch (error) {
         log.failure("Error deleting delivered photo", error, { photoId: id });
         throw error;

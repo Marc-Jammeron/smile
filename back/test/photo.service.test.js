@@ -358,7 +358,7 @@ test('deleteDeliveredPhoto deletes the DB row and every associated S3 object whe
 
     const result = await deleteDeliveredPhoto('photo-1');
 
-    assert.equal(result, true);
+    assert.deepEqual(result, { collectionId: fakePhoto.collectionId });
     assert.deepEqual(destroyedWhere, { id: 'photo-1' });
     assert.deepEqual(deletedS3Keys.sort(), [ORIGINAL_KEY, PREVIEW_KEY, THUMBNAIL_KEY].sort());
 });

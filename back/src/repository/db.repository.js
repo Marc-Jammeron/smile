@@ -6,6 +6,7 @@ import CollectionModel from "../model/collection.model.js";
 import PhotoModel from "../model/photos.model.js";
 import PhotoAttachmentModel from "../model/photo-attachment.model.js";
 import GallerySettingsModel from "../model/gallery-settings.model.js";
+import CollectionArchiveModel from "../model/collection-archive.model.js";
 import logger from "../logger.js";
 
 const log = logger.child("db");
@@ -81,9 +82,13 @@ const Collection = CollectionModel(sequelize, DataTypes);
 const Photo = PhotoModel(sequelize, DataTypes);
 const PhotoAttachment = PhotoAttachmentModel(sequelize, DataTypes);
 const GallerySettings = GallerySettingsModel(sequelize, DataTypes);
+const CollectionArchive = CollectionArchiveModel(sequelize, DataTypes);
 
 Collection.hasMany(Photo, { foreignKey: "collectionId" });
 Photo.belongsTo(Collection, { foreignKey: "collectionId" });
+
+Collection.hasMany(CollectionArchive, { foreignKey: "collectionId" });
+CollectionArchive.belongsTo(Collection, { foreignKey: "collectionId" });
 
 Photo.hasMany(PhotoAttachment, { foreignKey: "photoId" });
 PhotoAttachment.belongsTo(Photo, { foreignKey: "photoId" });
@@ -94,7 +99,8 @@ const db = {
     Collection,
     Photo,
     PhotoAttachment,
-    GallerySettings
+    GallerySettings,
+    CollectionArchive
 };
 
 export default db;

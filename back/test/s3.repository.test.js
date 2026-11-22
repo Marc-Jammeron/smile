@@ -27,3 +27,32 @@ test('getSignedDownloadUrl signs each key separately', async () => {
     assert.match(a, /a\.jpg/);
     assert.match(b, /b\.jpg/);
 });
+
+test('getSignedArchiveDownloadUrl forces a download under the given filename', async () => {
+    const url = new URL(await s3Repository.getSignedArchiveDownloadUrl('archives/c/DELIVERED-abc.zip', 'Mariage été (Léa).zip'));
+    assert.match(url.pathname, /archives\/c\/DELIVERED-abc\.zip/);
+    assert.equal(url.searchParams.get('X-Amz-Expires'), '300');
+    assert.equal(url.searchParams.get('response-content-type'), 'application/zip');
+    assert.equal(
+        url.searchParams.get('response-content-disposition'),
+        "attachment; filename*=UTF-8''Mariage%20%C3%A9t%C3%A9%20%28L%C3%A9a%29.zip"
+    );
+});
+
+test('getSignedArchiveDownloadUrl is not cached: the filename is part of the signature', async () => {
+    const [a, b] = await Promise.all([
+        s3Repository.getSignedArchiveDownloadUrl('archives/c/DELIVERED-abc.zip', 'a.zip'),
+        s3Repository.getSignedArchiveDownloadUrl('archives/c/DELIVERED-abc.zip', 'b.zip'),
+    ]);
+    assert.notEqual(a, b);
+});
+
+test('createStreamUpload returns an Upload to await or abort, and sends nothing by itself', async () => {
+    const upload = s3Repository.createStreamUpload('archives/c/x.zip', Buffer.from('x'), {
+        contentType: 'application/zip',
+        partSizeBytes: 16 * 1024 * 1024,
+        queueSize: 2,
+    });
+    assert.equal(typeof upload.done, 'function');
+    assert.equal(typeof upload.abort, 'function');
+});
