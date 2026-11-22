@@ -26,15 +26,37 @@ export const updateClientPhotoSelection = async (token, photoId, status) => {
     return response.json()
 }
 
+// Asks for the "download all" ZIP. The server builds it in the background, so the answer is
+// one of: { state: 'ready', url } (navigate to it), { state: 'pending', status } (being
+// prepared, ask again later) or { state: 'failed' }. No file goes through this request.
 export const downloadAllDeliveredPhotos = async (token) => {
     const response = await publicFetch(`/client/${token}/download-all`)
+    const data = await response.json().catch(() => ({}))
+    if (response.status === 200 && data.url) {
+        return { state: 'ready', url: data.url }
+    }
+    if (response.status === 202) {
+        return { state: 'pending', status: data.status }
+    }
+    if (response.status === 409 && data.status === 'FAILED') {
+        return { state: 'failed' }
+    }
+    const error = new Error(data.error || 'Impossible de préparer le téléchargement. Réessayez plus tard.')
+    error.status = response.status
+    throw error
+}
+
+// Light status of the ZIP, for the polling (the gallery itself is far too heavy to reload).
+// Resolves to { status, sizeBytes, photoCount }, or null when there is nothing to download.
+export const getClientArchiveStatus = async (token) => {
+    const response = await publicFetch(`/client/${token}/archive`)
     if (!response.ok) {
-        const data = await response.json().catch(() => ({}))
-        const error = new Error(data.error || 'Failed to download all photos')
+        const error = new Error('Failed to read the archive status')
         error.status = response.status
         throw error
     }
-    return response
+    const data = await response.json()
+    return data.archive ?? null
 }
 
 export const validateClientSelection = async (token) => {

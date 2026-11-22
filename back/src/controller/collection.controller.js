@@ -1,6 +1,8 @@
 import logger from '../logger.js';
-import { getAllCollections, getCollectionById, createCollection, pickCollectionFields, UPDATABLE_COLLECTION_FIELDS, deleteCollection, revokeCollectionAccess, getCollectionProcessingStatus, streamSelectionHdZip, markCollectionAsReady } from '../services/collection.service.js';
+import { getAllCollections, getCollectionById, createCollection, pickCollectionFields, UPDATABLE_COLLECTION_FIELDS, deleteCollection, revokeCollectionAccess, getCollectionProcessingStatus, markCollectionAsReady } from '../services/collection.service.js';
 
+import { requestSelectionHdDownload, toDownloadResponse, getCollectionArchives, retryArchive, isArchiveKind } from '../services/collection-archive.service.js';
+import { wakeArchiveWorker } from '../services/archive-worker.service.js';
 import { updateCollectionOrDeferSend, cancelSendRequest, SEND_DEFERRED_MESSAGE } from '../services/collection-send.service.js';
 
 const log = logger.child('collection.controller');
@@ -98,19 +100,53 @@ export const deleteCollectionByIdController = async (req, res) => {
     }
 };
 
+// The retouching ZIP is built in the background: this answers with a presigned URL once it
+// is ready (200), or that it is being prepared (202) or has failed (409). See toDownloadResponse.
 export const downloadSelectionHdController = async (req, res) => {
     const { id } = req.params;
     try {
         log.info('Selection HD ZIP requested', { collectionId: id });
-        await streamSelectionHdZip(id, res);
-        log.info('Selection HD ZIP sent', { collectionId: id });
+        const result = await requestSelectionHdDownload(id);
+        const { httpStatus, body } = toDownloadResponse('SELECTION_HD', result);
+        log.info('Selection HD ZIP request answered', { collectionId: id, state: result.state, httpStatus });
+        res.status(httpStatus).json(body);
     } catch (error) {
-        if (res.headersSent) {
-            log.error('Selection HD ZIP failed after streaming started', error, { collectionId: id });
-            return;
+        log.failure('Failed to answer the selection HD ZIP request', error, { collectionId: id });
+        res.status(error.status || 500).json({ error: error.status ? error.message : 'Erreur lors de la préparation du ZIP' });
+    }
+};
+
+export const getCollectionArchivesController = async (req, res) => {
+    const { id } = req.params;
+    try {
+        const archives = await getCollectionArchives(id);
+        if (!archives) {
+            log.warn('Collection of the archives status not found', { collectionId: id });
+            return res.status(404).json({ error: 'Collection not found' });
         }
-        log.failure('Failed to generate the selection HD ZIP', error, { collectionId: id });
-        res.status(error.status || 500).json({ error: error.status ? error.message : 'Erreur lors de la génération du ZIP' });
+        res.json(archives);
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to fetch the archives status' });
+    }
+};
+
+export const retryArchiveController = async (req, res) => {
+    const { id, kind } = req.params;
+    if (!isArchiveKind(kind)) {
+        return res.status(400).json({ error: 'Unknown archive kind' });
+    }
+    try {
+        const archive = await retryArchive(id, kind);
+        if (!archive) {
+            log.warn('Archive retry refused: nothing to retry', { collectionId: id, kind });
+            return res.status(409).json({ error: 'No failed archive to retry' });
+        }
+        wakeArchiveWorker();
+        log.info('Archive retry started', { collectionId: id, kind });
+        res.json({ kind, status: archive.status });
+    } catch (error) {
+        log.failure('Failed to retry the archive', error, { collectionId: id, kind });
+        res.status(500).json({ error: 'Failed to retry the archive' });
     }
 };
 

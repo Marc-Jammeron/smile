@@ -2,13 +2,8 @@ import { useState } from 'react'
 import Photo from 'front-shared/src/Photo.jsx'
 import PhotoUploadForm from './PhotoUploadForm.jsx'
 import ClientMessageBox from './ClientMessageBox.jsx'
-import { apiFetch } from '../api/http.js'
-
-
-const extractZipFilename =(contentDisposition, fallback) => {
-    const match = contentDisposition?.match(/filename="?([^";]+)"?/)
-    return match ? match[1] : fallback
-}
+import { describeSelectionHdButton } from 'front-shared/src/archiveStatus.js'
+import useSelectionArchive from '../hooks/useSelectionArchive.js'
 
 const MESSAGE_LABEL = (title) =>
     `${title} (optionnel, markdown : **gras**, *italique*, listes, [liens](https://…)) — n'hésite pas à demander à ChatGPT de mettre ton texte au format md avant de le copier-coller`
@@ -18,8 +13,6 @@ export default function PhotoList({ collection, photos, loading, onBack, onAddPh
     const [showDeliveredForm, setShowDeliveredForm] = useState(false)
     const [copied, setCopied] = useState(false)
     const [revoking, setRevoking] = useState(false)
-    const [downloadingSelection, setDownloadingSelection] = useState(false)
-    const [downloadError, setDownloadError] = useState(null)
     const [markingReady, setMarkingReady] = useState(false)
     const [markReadyError, setMarkReadyError] = useState(null)
     const [deleting, setDeleting] = useState(false)
@@ -30,6 +23,8 @@ export default function PhotoList({ collection, photos, loading, onBack, onAddPh
     const isEditing = collection.status === 'EDITING'
     const isReady = collection.status === 'READY'
     const selectedCount = photos.filter(photo => photo.status === 'SELECTED').length
+    // The retouching ZIP is prepared by the server in the background (see useSelectionArchive).
+    const selectionZip = useSelectionArchive(collection.id, isEditing)
     // A collection created straight in EDITING (final photos uploaded directly) never had a client selection.
     const hasSelection = collection.maxPhotos > 0 || selectedCount > 0
     const deliveredPhotos = photos.filter(photo => photo.status === 'DELIVERED')
@@ -134,34 +129,7 @@ export default function PhotoList({ collection, photos, loading, onBack, onAddPh
         }
     }
 
-    const handleDownloadSelection = async () => {
-        setDownloadingSelection(true)
-        setDownloadError(null)
-        try {
-            const response = await apiFetch(`/collections/${collection.id}/download-selection-hd`)
-            if (!response.ok) {
-                const data = await response.json().catch(() => ({}))
-                throw new Error(data.error || 'Le téléchargement de la sélection HD a échoué')
-            }
-            const blob = await response.blob()
-            const filename = extractZipFilename(response.headers.get('Content-Disposition'), `${collection.name}-HD.zip`)
-
-            const url = URL.createObjectURL(blob)
-            const link = document.createElement('a')
-            link.href = url
-            link.download = filename
-            document.body.appendChild(link)
-            link.click()
-            link.remove()
-            URL.revokeObjectURL(url)
-        } catch (error) {
-            console.error('Error downloading HD selection:', error)
-            setDownloadError(error.message)
-        } finally {
-            setDownloadingSelection(false)
-        }
-    }
-
+    const selectionButton = describeSelectionHdButton(selectionZip.archive, { downloading: selectionZip.busy && !selectionZip.archive, selectedCount })
     const canViewAsClient = clientGalleryUrl && !collection.accessTokenRevokedAt
 
     return (
@@ -202,23 +170,25 @@ export default function PhotoList({ collection, photos, loading, onBack, onAddPh
                 >
                     {deleting ? 'Suppression...' : 'Supprimer la galerie'}
                 </button>
-                {collection.status === 'EDITING' && hasSelection && (
-                    <button
-                        type="button"
-                        className="button-primary"
-                        onClick={handleDownloadSelection}
-                        disabled={downloadingSelection || selectedCount === 0}
-                        title={selectedCount === 0 ? 'Aucune photo sélectionnée' : undefined}
-                    >
-                        {downloadingSelection ? (
-                            <>
-                                <span className="button-spinner" />
-                                Génération du ZIP…
-                            </>
-                        ) : (
-                            `Télécharger la sélection HD (${selectedCount} photo${selectedCount > 1 ? 's' : ''})`
+                {isEditing && hasSelection && (
+                    <>
+                        {selectionButton.failed && <span className="archive-failed-badge" title={selectionButton.title}>Échec</span>}
+                        <button
+                            type="button"
+                            className="button-primary"
+                            onClick={selectionZip.download}
+                            disabled={selectionButton.disabled || selectionZip.busy}
+                            title={selectionButton.title}
+                        >
+                            {selectionButton.busy && <span className="button-spinner" />}
+                            {selectionButton.failed ? 'Télécharger la sélection HD' : selectionButton.label}
+                        </button>
+                        {selectionButton.failed && (
+                            <button type="button" className="button-outline" onClick={selectionZip.retry} disabled={selectionZip.busy}>
+                                Réessayer
+                            </button>
                         )}
-                    </button>
+                    </>
                 )}
             </div>
             {deleteError && (
@@ -227,10 +197,10 @@ export default function PhotoList({ collection, photos, loading, onBack, onAddPh
                     <button type="button" className="toast-dismiss" onClick={() => setDeleteError(null)} aria-label="Fermer">×</button>
                 </div>
             )}
-            {downloadError && (
+            {selectionZip.error && (
                 <div className="toast toast-error" role="alert">
-                    <span>{downloadError}</span>
-                    <button type="button" className="toast-dismiss" onClick={() => setDownloadError(null)} aria-label="Fermer">×</button>
+                    <span>{selectionZip.error}</span>
+                    <button type="button" className="toast-dismiss" onClick={selectionZip.clearError} aria-label="Fermer">×</button>
                 </div>
             )}
             {processingRemaining > 0 && (

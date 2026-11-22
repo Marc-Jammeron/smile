@@ -1,5 +1,6 @@
 import logger from '../logger.js';
 import { wakeWorker } from '../services/photo-worker.service.js';
+import { refreshArchive, refreshSelectionArchivesForPhotos } from '../services/collection-archive.service.js';
 import { getAllPhotosByCollectionId, getPhotoById, createPhotosBatch, confirmPhotosBatch, updatePhoto, updatePhotoSelectionStatus, softDeletePhoto, deleteDeliveredPhoto, retryPhotoProcessing } from '../services/photo.service.js';
 
 const log = logger.child('photo.controller');
@@ -56,6 +57,8 @@ export const confirmNewPhotosBatch = async (req, res) => {
             // waiting for the next poll (no-op when the worker runs in another process).
             wakeWorker();
         }
+        // RAW/XMP attachments added to existing photos change what the retouching ZIP holds.
+        await refreshSelectionArchivesForPhotos(result.createdAttachments.map(({ photoId }) => photoId));
         const summary = {
             created: result.created.length,
             failed: result.failed.length,
@@ -132,6 +135,8 @@ export const deleteDeliveredPhotoById = async (req, res) => {
             res.status(404).json({ error: 'Photo not found' });
         } else {
             log.info('Delivered photo deleted', { photoId: id });
+            // Still possible once the collection is READY: the delivered ZIP no longer matches.
+            await refreshArchive(deleted.collectionId, 'DELIVERED');
             res.json({ message: 'Delivered photo deleted successfully' });
         }
     } catch (error) {

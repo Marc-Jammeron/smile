@@ -1,9 +1,9 @@
 import crypto from "crypto";
-import archiver from "archiver";
 import { Op } from "sequelize";
 import db from "../repository/db.repository.js";
 import s3Repository from "../repository/s3.repository.js";
-import { getSelectedPhotosForCollection, getDeliveredPhotosForZip, getPhotoDownloadFilename, getAttachmentsForPhotos } from "./photo.service.js";
+import { getAttachmentsForPhotos } from "./photo.service.js";
+import { refreshArchive, discardArchives, deleteArchivesForCollection } from "./collection-archive.service.js";
 import logger from "../logger.js";
 
 const log = logger.child("collection.service");
@@ -119,6 +119,18 @@ const assertStatusTransitionAllowed = (collection, newStatus) => {
     }
 };
 
+// The ZIPs follow the status. Entering EDITING (the client validated, or the photographer
+// moved the collection) queues the retouching ZIP. ARCHIVED removes every ZIP: nobody can
+// reach them any more. It also runs when the collection is already ARCHIVED, so repeating
+// the request cleans up what a previous failure left behind. Neither can fail the change.
+const updateArchivesAfterStatusChange = async (collectionId, previousStatus, newStatus) => {
+    if (newStatus === 'EDITING' && previousStatus !== 'EDITING') {
+        await refreshArchive(collectionId, 'SELECTION_HD');
+    } else if (newStatus === 'ARCHIVED') {
+        await discardArchives(collectionId);
+    }
+};
+
 export const updateCollection = async (id, collectionData) => {
     try {
         // clientMessage is shown while the client selects, finalMessage once the collection is READY.
@@ -136,12 +148,14 @@ export const updateCollection = async (id, collectionData) => {
             collectionData = { ...collectionData, [field]: message };
         }
 
+        let previousStatus = null;
         if (collectionData.status !== undefined) {
             const collection = await db.Collection.findByPk(id);
             if (!collection) {
                 log.debug("Collection to update not found", { collectionId: id });
                 return null;
             }
+            previousStatus = collection.status;
             assertStatusTransitionAllowed(collection, collectionData.status);
             if (collectionData.status === 'SELECTING' && !collection.accessToken) {
                 collectionData = { ...collectionData, accessToken: crypto.randomBytes(32).toString('base64url') };
@@ -159,6 +173,7 @@ export const updateCollection = async (id, collectionData) => {
         if (collectionData.status) {
             log.info("Collection status changed", { collectionId: id, status: collectionData.status });
         }
+        await updateArchivesAfterStatusChange(id, previousStatus, collectionData.status);
         return await db.Collection.findByPk(id);
     } catch (error) {
         log.failure("Error updating collection", error, { collectionId: id });
@@ -196,6 +211,8 @@ export const deleteCollection = async (id) => {
         // Catches whatever the DB doesn't know about (unconfirmed uploads, leftovers).
         await s3Repository.deleteByPrefix(`uploads/${id}/`);
         await s3Repository.deleteByPrefix(`attachments/${id}/`);
+        // Pre-generated ZIPs (their rows go with the collection, their files do not).
+        await deleteArchivesForCollection(id);
 
         await db.Collection.destroy({ where: { id } });
         log.info("Collection deleted", { collectionId: id, deletedObjects: keys.length });
@@ -215,127 +232,6 @@ export const revokeCollectionAccess = async (id) => {
         return updatedRows > 0;
     } catch (error) {
         log.failure("Error revoking collection access", error, { collectionId: id });
-        throw error;
-    }
-};
-
-const stripDiacritics = (value) => Array.from(value.normalize('NFD'))
-    .filter((char) => {
-        const codePoint = char.codePointAt(0);
-        return codePoint < 0x0300 || codePoint > 0x036f; // combining diacritical marks block
-    })
-    .join('');
-
-const slugifyCollectionName = (name) => {
-    const slug = stripDiacritics(name)
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, '-')
-        .replace(/(^-+|-+$)/g, '');
-    return slug || 'collection';
-};
-
-// Streams the ZIP directly to `res` (archiver piped into the response, no temp file
-// and no full in-memory buffer). Errors are split by whether any bytes have already
-// reached the client: before that point we can still throw and let the caller answer
-// with a JSON error; once streaming has started, the HTTP status is already sent, so
-// we can only log server-side and drop the connection.
-export const streamSelectionHdZip = async (collectionId, res) => {
-    const collection = await db.Collection.findByPk(collectionId);
-    if (!collection) {
-        const error = new Error('Collection introuvable');
-        error.status = 404;
-        throw error;
-    }
-    if (collection.status !== 'EDITING') {
-        log.debug("HD ZIP refused: wrong collection status", { collectionId, status: collection.status });
-        const error = new Error('La collection doit être en phase Retouche pour télécharger la sélection HD.');
-        error.status = 409;
-        throw error;
-    }
-
-    const photos = await getSelectedPhotosForCollection(collectionId);
-    if (photos.length === 0) {
-        const error = new Error('Aucune photo sélectionnée dans cette collection.');
-        error.status = 400;
-        throw error;
-    }
-
-    // RAW/XMP attachments, when present, replace the JPEG entirely for that photo
-    // (not added alongside it) — Emma retouches from the originals, not the JPEG,
-    // once she has them. No attachments -> fallback to the JPEG HD file as before.
-    const attachments = await getAttachmentsForPhotos(photos.map((photo) => photo.id));
-    const attachmentsByPhotoId = new Map();
-    for (const attachment of attachments) {
-        if (!attachmentsByPhotoId.has(attachment.photoId)) {
-            attachmentsByPhotoId.set(attachment.photoId, []);
-        }
-        attachmentsByPhotoId.get(attachment.photoId).push(attachment);
-    }
-
-    const date = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-    const zipFilename = `${slugifyCollectionName(collection.name)}-HD-${date}.zip`;
-
-    res.setHeader('Content-Type', 'application/zip');
-    res.setHeader('Content-Disposition', `attachment; filename="${zipFilename}"`);
-
-    const archive = archiver('zip', { zlib: { level: 1 } });
-    let archiveError = null;
-    archive.on('error', (err) => {
-        archiveError = err;
-        log.error("Archiver error while building the selection HD ZIP", err, { collectionId });
-        archive.abort();
-    });
-    archive.on('warning', (err) => {
-        log.warn("Archiver warning while building the selection HD ZIP", err, { collectionId });
-    });
-    archive.pipe(res);
-    log.debug("Streaming selection HD ZIP", { collectionId, zipFilename, photoCount: photos.length, attachmentCount: attachments.length });
-
-    // Failures are collected instead of just logged: a missing CR2 makes a photo
-    // unretouchable, so it must be visible in the delivered ZIP, not just in server
-    // logs. A per-file failure never aborts the rest of the stream.
-    const failures = [];
-
-    const appendToZip = async (s3Key, entryName, describeFailure) => {
-        try {
-            const stream = await s3Repository.getObjectStream(s3Key);
-            stream.on('error', (err) => {
-                log.error(`Error streaming ${describeFailure}`, err, { collectionId, s3Key });
-            });
-            archive.append(stream, { name: entryName });
-            log.debug("Added file to selection HD ZIP", { collectionId, entryName });
-        } catch (err) {
-            log.error(`Error fetching ${describeFailure} from storage`, err, { collectionId, s3Key });
-            failures.push(`${entryName}: ${err.message}`);
-        }
-    };
-
-    for (const photo of photos) {
-        const photoAttachments = attachmentsByPhotoId.get(photo.id) || [];
-        if (photoAttachments.length > 0) {
-            for (const attachment of photoAttachments) {
-                await appendToZip(attachment.s3Key, attachment.originalFilename, `attachment for photo ${photo.id}`);
-            }
-        } else {
-            await appendToZip(photo.key, getPhotoDownloadFilename(photo), `original HD file for photo ${photo.id}`);
-        }
-    }
-
-    if (failures.length > 0) {
-        log.warn("Selection HD ZIP is missing files, adding _erreurs.txt", { collectionId, failureCount: failures.length });
-        archive.append(Buffer.from(failures.join('\n'), 'utf-8'), { name: '_erreurs.txt' });
-    }
-
-    await archive.finalize();
-    log.debug("Selection HD ZIP finalized", { collectionId, bytes: archive.pointer(), failureCount: failures.length });
-
-    if (archiveError) {
-        if (res.headersSent) {
-            log.error("Selection HD ZIP broken (streaming already started)", archiveError, { collectionId });
-            return;
-        }
-        const error = new Error('Erreur lors de la génération du ZIP');
-        error.status = 500;
         throw error;
     }
 };
@@ -421,67 +317,12 @@ export const markCollectionAsReady = async (id) => {
     }
     log.info("Storage cleanup after delivery done", { collectionId: id, objectCount: keys.length, failedDeletions });
 
+    // Only now that the non-delivered photos are gone: the retouching ZIP contains originals
+    // that no longer exist, the delivered ZIP is built from what is left.
+    await discardArchives(id, ['SELECTION_HD']);
+    await refreshArchive(id, 'DELIVERED');
+
     return await db.Collection.findByPk(id);
-};
-
-// Same archiver-streaming pattern as streamSelectionHdZip (§ admin HD download), but
-// for the client-facing "download all" of the final DELIVERED photos once the
-// collection is READY. `collection` is passed in already loaded (by loadGalleryByToken)
-// rather than re-fetched by id, since the client route resolves it from the access token.
-export const streamDeliveredZip = async (collection, res) => {
-    if (collection.status !== 'READY') {
-        const error = new Error('La collection doit être prête pour télécharger les photos livrées.');
-        error.status = 409;
-        throw error;
-    }
-
-    const photos = await getDeliveredPhotosForZip(collection.id);
-    log.debug("Streaming delivered ZIP", { collectionId: collection.id, photoCount: photos.length });
-
-    const date = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-    const zipFilename = `${slugifyCollectionName(collection.name)}-${date}.zip`;
-
-    res.setHeader('Content-Type', 'application/zip');
-    res.setHeader('Content-Disposition', `attachment; filename="${zipFilename}"`);
-
-    const archive = archiver('zip', { zlib: { level: 1 } });
-    let archiveError = null;
-    archive.on('error', (err) => {
-        archiveError = err;
-        log.error("Archiver error while building the delivered ZIP", err, { collectionId: collection.id });
-        archive.abort();
-    });
-    archive.on('warning', (err) => {
-        log.warn("Archiver warning while building the delivered ZIP", err, { collectionId: collection.id });
-    });
-    archive.pipe(res);
-
-    let skippedFiles = 0;
-    for (const photo of photos) {
-        try {
-            const stream = await s3Repository.getObjectStream(photo.key);
-            stream.on('error', (err) => {
-                log.error("Error streaming delivered file", err, { photoId: photo.id, collectionId: collection.id });
-            });
-            archive.append(stream, { name: getPhotoDownloadFilename(photo) });
-        } catch (err) {
-            skippedFiles += 1;
-            log.error("Error fetching delivered file from storage, it will be missing from the ZIP", err, { photoId: photo.id, collectionId: collection.id });
-        }
-    }
-
-    await archive.finalize();
-    log.debug("Delivered ZIP finalized", { collectionId: collection.id, bytes: archive.pointer(), skippedFiles });
-
-    if (archiveError) {
-        if (res.headersSent) {
-            log.error("Delivered ZIP broken (streaming already started)", archiveError, { collectionId: collection.id });
-            return;
-        }
-        const error = new Error('Erreur lors de la génération du ZIP');
-        error.status = 500;
-        throw error;
-    }
 };
 
 export const markCollectionAsViewed = async (id) => {

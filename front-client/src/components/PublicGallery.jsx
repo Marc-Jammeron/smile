@@ -4,17 +4,13 @@ import PhotoLightbox from 'front-shared/src/PhotoLightbox.jsx'
 import { STATUS } from 'front-shared/src/constants/collectionStatus.js'
 import ClientGalleryHeader from 'front-shared/src/ClientGalleryHeader.jsx'
 import { buildBrandingStyle } from 'front-shared/src/brandingStyle.js'
-import { getClientGallery, updateClientPhotoSelection, validateClientSelection, downloadAllDeliveredPhotos } from '../api/publicGallery.js'
+import { ARCHIVE_POLL_INTERVAL_MS, ARCHIVE_STATUS, isArchivePending, describeDownloadAllButton } from 'front-shared/src/archiveStatus.js'
+import { getClientGallery, updateClientPhotoSelection, validateClientSelection, downloadAllDeliveredPhotos, getClientArchiveStatus } from '../api/publicGallery.js'
 import ReviewCard from './ReviewCard.jsx'
 import '../App.css'
 
-const extractZipFilename = (contentDisposition, fallback) => {
-    const match = contentDisposition?.match(/filename="?([^";]+)"?/)
-    return match ? match[1] : fallback
-}
-
 const galleryLoadedState = (data) => ({
-    loading: false, notFound: false, error: null, collection: data.collection, photos: data.photos, photographerName: data.photographerName, branding: data.branding ?? null
+    loading: false, notFound: false, error: null, collection: data.collection, photos: data.photos, photographerName: data.photographerName, branding: data.branding ?? null, archive: data.archive ?? null
 })
 
 const galleryErrorState = (error) => ({
@@ -26,7 +22,7 @@ const galleryErrorState = (error) => ({
 })
 
 export default function PublicGallery({ token }) {
-    const [state, setState] = useState({ loading: true, notFound: false, error: null, collection: null, photos: [], photographerName: null, branding: null })
+    const [state, setState] = useState({ loading: true, notFound: false, error: null, collection: null, photos: [], photographerName: null, branding: null, archive: null })
     const [validating, setValidating] = useState(false)
     const [validationError, setValidationError] = useState(null)
     const [lightboxIndex, setLightboxIndex] = useState(null)
@@ -56,22 +52,41 @@ export default function PublicGallery({ token }) {
         }))
     }
 
+    // The ZIP is prepared by the server in the background. While it is, the page asks for its
+    // status every few seconds; the button only comes alive once the file is there.
+    const archiveStatus = state.archive?.status
+    useEffect(() => {
+        if (!isArchivePending(archiveStatus)) return undefined
+        let cancelled = false
+        const timer = setInterval(async () => {
+            try {
+                const archive = await getClientArchiveStatus(token)
+                if (!cancelled) setState(current => ({ ...current, archive }))
+            } catch {
+                // A failed poll changes nothing: the next one will tell.
+            }
+        }, ARCHIVE_POLL_INTERVAL_MS)
+        return () => {
+            cancelled = true
+            clearInterval(timer)
+        }
+    }, [archiveStatus, token])
+
     const handleDownloadAll = async () => {
         setDownloadingAll(true)
         setDownloadAllError(null)
         try {
-            const response = await downloadAllDeliveredPhotos(token)
-            const blob = await response.blob()
-            const filename = extractZipFilename(response.headers.get('Content-Disposition'), `${state.collection.name}.zip`)
-
-            const url = URL.createObjectURL(blob)
-            const link = document.createElement('a')
-            link.href = url
-            link.download = filename
-            document.body.appendChild(link)
-            link.click()
-            link.remove()
-            URL.revokeObjectURL(url)
+            const result = await downloadAllDeliveredPhotos(token)
+            if (result.state === 'ready') {
+                // The browser downloads straight from storage (the URL forces a download, so the
+                // page stays where it is): no fetch, no CORS, no multi-gigabyte blob in memory.
+                window.location.assign(result.url)
+            } else {
+                // Not ready (the content changed, or the ZIP was lost and is being rebuilt) or
+                // failed: show it, and the polling takes over.
+                const status = result.state === 'failed' ? ARCHIVE_STATUS.FAILED : result.status
+                setState(current => ({ ...current, archive: { ...current.archive, status } }))
+            }
         } catch (error) {
             setDownloadAllError(error.message)
         } finally {
@@ -120,6 +135,7 @@ export default function PublicGallery({ token }) {
     }
 
     const { collection, photos, photographerName, branding } = state
+    const downloadAllButton = describeDownloadAllButton(state.archive, { downloading: downloadingAll, photographerName })
     const isSelecting = collection.status === STATUS.SELECTING
     const isReady = collection.status === STATUS.READY
     const isValidated = collection.status === STATUS.EDITING
@@ -191,9 +207,9 @@ export default function PublicGallery({ token }) {
                             type="button"
                             className="client-validate-button"
                             onClick={handleDownloadAll}
-                            disabled={downloadingAll}
+                            disabled={downloadAllButton.disabled}
                         >
-                            {downloadingAll ? 'Génération du ZIP…' : 'Télécharger tout'}
+                            {downloadAllButton.label}
                         </button>
                     </div>
                 )}
